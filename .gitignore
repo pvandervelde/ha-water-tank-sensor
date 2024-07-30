@@ -12,3 +12,8 @@ Cargo.lock
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
+
+# Kicad files
+schematics/~*.kicad_sch.lck
+schematics/*-backups/
+schematics/#auto_saved_files#
