@@ -6558,7 +6558,7 @@
 				)
 			)
 		)
-		(property "Value" "~"
+		(property "Value" "EC2-12NU"
 			(at 184.15 79.3496 90)
 			(effects
 				(font
