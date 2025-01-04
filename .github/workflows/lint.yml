@@ -74,7 +74,7 @@ jobs:
         uses: actions-rs/clippy-check@b5b5f21f4797c02da247df37026fcd0a5024aa4d # v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features --manifest-path path/to/Cargo.toml
+          args: --all-features --manifest-path ${{ matrix.path }}/Cargo.toml
 
 
   # cargo-semver-checks-action doesn't currently support specifying a base version manually.
