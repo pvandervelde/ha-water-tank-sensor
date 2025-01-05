@@ -1,8 +1,9 @@
 use blocking_network_stack::Stack;
 use esp_hal::{
+    delay::Delay,
     peripherals::{RADIO_CLK, TIMG0, WIFI},
     rng::Rng,
-    time,
+    time::{self, Duration},
     timer::timg::TimerGroup,
     Blocking,
 };
@@ -21,6 +22,10 @@ use thiserror::Error;
 #[derive(Debug, Error, PartialEq)]
 #[non_exhaustive]
 pub enum WifiError {
+    // Indicates that we failed to connect to the given Wifi SSID
+    #[error("Failed to connect to the given Wifi SSID.")]
+    FailedToConnect { ssid: String<32> },
+
     /// Indicats that we failed to initialize the Wifi device
     #[error("Failed to initialize the Wifi device.")]
     FailedToInitializeTheWifiDevice,
@@ -99,7 +104,7 @@ pub fn connect_to_wifi<'a>(
     let stack = Stack::new(iface, device, socket_set, now, random);
 
     let connection_controllers = ConnectionControllers::new(controller, stack);
-    let mut connection_controllers = guard(connection_controllers, |mut c| {
+    let mut connection_controllers_guarded = guard(connection_controllers, |mut c| {
         info!("Disconnecting from the Wifi ...");
 
         // We don't care about any errors but we can't use ? because the closure doesn't return anything
@@ -107,53 +112,72 @@ pub fn connect_to_wifi<'a>(
     });
 
     let client_config = Configuration::Client(ClientConfiguration {
-        ssid,
+        ssid: ssid.clone(),
         password,
         ..Default::default()
     });
-    let res = connection_controllers
+    let res = connection_controllers_guarded
         .wifi_mut()
         .set_configuration(&client_config);
     debug!("wifi_set_configuration returned {:?}", res);
 
-    connection_controllers.wifi_mut().start().unwrap();
-    debug!(
-        "is wifi started: {:?}",
-        connection_controllers.wifi().is_started()
-    );
-    debug!(
-        "wifi_connect {:?}",
-        connection_controllers.wifi_mut().connect()
-    );
+    let start_result = connection_controllers_guarded.wifi_mut().start();
+    debug!("wifi start result: {:?}", start_result);
 
-    // wait to get connected
-    info!("Connecting to the Wifi ...");
+    let delay = Delay::new();
+    let deadline = time::now() + Duration::secs(30);
+    debug!("waiting for wifi device to start ...");
     loop {
-        match connection_controllers.wifi().is_connected() {
+        match connection_controllers_guarded.wifi().is_started() {
             Ok(true) => break,
             Ok(false) => {}
             Err(err) => {
                 error!("{:?}", err);
             }
         }
+
+        delay.delay_millis(100);
+        if time::now() > deadline {
+            return Err(WifiError::FailedToConnect { ssid: ssid.clone() });
+        }
     }
-    debug!("{:?}", connection_controllers.wifi().is_connected());
+
+    let connect_result = connection_controllers_guarded.wifi_mut().connect();
+    debug!("wifi_connect {:?}", connect_result);
+
+    // wait to get connected
+    let deadline = time::now() + Duration::secs(30);
+    info!("Connecting to {:?} ...", ssid.clone());
+    loop {
+        match connection_controllers_guarded.wifi().is_connected() {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(err) => {
+                error!("{:?}", err);
+            }
+        }
+
+        delay.delay_millis(100);
+        if time::now() > deadline {
+            return Err(WifiError::FailedToConnect { ssid: ssid.clone() });
+        }
+    }
 
     // wait for getting an ip address
     info!("Waiting for an IP address ...");
     loop {
-        connection_controllers.network().work();
+        connection_controllers_guarded.network().work();
 
-        if connection_controllers.network().is_iface_up() {
+        if connection_controllers_guarded.network().is_iface_up() {
             info!(
                 "Obtained IP address: {:?}",
-                connection_controllers.network().get_ip_info()
+                connection_controllers_guarded.network().get_ip_info()
             );
             break;
         }
     }
 
-    Ok(connection_controllers)
+    Ok(connection_controllers_guarded)
 }
 
 /// Initializes the ESP32 wifi unit.
