@@ -1,0 +1,117 @@
+name: Rust Lint
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        path:
+          - "crates/app"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          target: riscv32imac-unknown-none-elf
+          toolchain: stable
+      - name: Enable caching
+        uses: Swatinem/rust-cache@v2
+      - working-directory: ${{ matrix.path }}
+        run: cargo check
+
+  rustfmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        path:
+          - "crates/app"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          target: riscv32imac-unknown-none-elf
+          toolchain: stable
+          components: rustfmt
+      - name: Enable caching
+        uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        working-directory: ${{ matrix.path }}
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    strategy:
+      fail-fast: false
+      matrix:
+        path:
+          - "crates/app"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          target: riscv32imac-unknown-none-elf
+          toolchain: stable
+          components: clippy
+      - name: Enable caching
+        uses: Swatinem/rust-cache@v2
+      - name: Clippy Output
+        working-directory: ${{ matrix.path }}
+        run: cargo clippy --no-deps --all-features
+
+
+  # cargo-semver-checks-action doesn't currently support specifying a base version manually.
+  #
+  # verify-semver:
+  #   runs-on: ubuntu-latest
+
+  #   steps:
+  #     - name: Set up Rust
+  #       uses: actions/checkout@v2
+  #     - name: Install Rust
+  #       uses: actions-rs/toolchain@v1
+  #       with:
+  #         profile: minimal
+  #         toolchain: stable
+  #     - name: Check semver
+  #       uses: obi1kenobi/cargo-semver-checks-action@48f4ef7da6d907d69d18249e0ba79aa98c61b9db
+
+  # Cargo deny has an issue with 'private' dependencies that have no license. See here: https://github.com/EmbarkStudios/cargo-deny/issues/736
+  #
+  # cargo-deny:
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     matrix:
+  #       checks:
+  #         - advisories
+  #         - bans licenses sources
+  #       path:
+  #         - "crates/app"
+
+  #   # Prevent sudden announcement of a new advisory from failing ci:
+  #   continue-on-error: ${{ matrix.checks == 'advisories' }}
+
+  #   steps:
+  #   - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+  #   - uses: EmbarkStudios/cargo-deny-action@8371184bd11e21dcf8ac82ebf8c9c9f74ebf7268 # v2
+  #     with:
+  #       command: check ${{ matrix.checks }}
+  #       manifest-path: ${{ matrix.path }}/Cargo.toml

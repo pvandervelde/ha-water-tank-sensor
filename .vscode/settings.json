@@ -1,0 +1,8 @@
+{
+    //"rust-analyzer.cargo.allTargets": false,
+    //"rust-analyzer.cargo.target": "riscv32imac-unknown-none-elf",
+    "rust-analyzer.linkedProjects": [
+        "crates/app/Cargo.toml",
+        //"crates/service/Cargo.toml",
+    ]
+}
