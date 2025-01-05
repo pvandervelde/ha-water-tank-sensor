@@ -49,12 +49,15 @@ use wifi::{connect_to_wifi, initialize_wifi};
 // CONSTANTS
 
 /// Period to wait between readings
+#[allow(dead_code)]
 const SAMPLING_PERIOD: Duration = Duration::secs(60);
 
 /// Duration of deep sleep
+#[allow(dead_code)]
 const DEEP_SLEEP_DURATION: Duration = Duration::secs(300);
 
 /// Period to wait before going to deep sleep
+#[allow(dead_code)]
 const AWAKE_PERIOD: Duration = Duration::secs(300);
 
 /// SSID for WiFi network
@@ -68,10 +71,10 @@ const HEAP_MEMORY_SIZE: usize = 72 * 1024;
 
 /// Buffer for SPI DMA
 //static BUFFER: StaticCell<[u8; BUFFERS_SIZE]> = StaticCell::new();
-
+//
 /// RX Buffer for SPI DMA
 //static RX_BUFFER: StaticCell<[u8; BUFFERS_SIZE]> = StaticCell::new();
-
+//
 #[derive(Debug, Error, PartialEq)]
 #[non_exhaustive]
 pub enum Error {
@@ -111,9 +114,9 @@ fn main() -> ! {
 
     reset::software_reset();
 
-    loop {
-        // Trick the compiler into thinking we're still here ...
-    }
+    delay.delay_millis(5000);
+
+    panic!("We should have gone into a reset")
 }
 
 /// The main function that returns an error if anything goes wrong.

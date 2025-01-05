@@ -28,15 +28,6 @@ pub enum WifiError {
     /// Indicates that there has been an internal error during the setup of the Wifi.
     #[error("An internal error occurred during the setup of the Wifi.")]
     InternalError,
-
-    /// Indicates that the Wifi credentials that were provided are not valid for the
-    /// given Wifi network.
-    #[error("The provided Wifi credentials are invalid for the provided SSID.")]
-    InvalidWifiCredentials,
-
-    /// Indicates that no Wifi network with the given SSID is reachable.
-    #[error("The provided SSID could not be found.")]
-    InvalidWifiSSID,
 }
 
 pub struct ConnectionControllers<'a> {
@@ -110,7 +101,9 @@ pub fn connect_to_wifi<'a>(
     let connection_controllers = ConnectionControllers::new(controller, stack);
     let mut connection_controllers = guard(connection_controllers, |mut c| {
         info!("Disconnecting from the Wifi ...");
-        c.wifi_mut().disconnect();
+
+        // We don't care about any errors but we can't use ? because the closure doesn't return anything
+        let _ = c.wifi_mut().disconnect();
     });
 
     let client_config = Configuration::Client(ClientConfiguration {
@@ -141,7 +134,6 @@ pub fn connect_to_wifi<'a>(
             Ok(false) => {}
             Err(err) => {
                 error!("{:?}", err);
-                loop {}
             }
         }
     }
@@ -175,11 +167,11 @@ pub fn connect_to_wifi<'a>(
 /// # Errors
 ///
 /// * [WifiError::FailedToInitializeTheWifiDevice] - Returns when the Wifi device could not be initialized.
-pub fn initialize_wifi<'a>(
-    timg0: TimerGroup<'a, TIMG0, Blocking>,
+pub fn initialize_wifi(
+    timg0: TimerGroup<'_, TIMG0, Blocking>,
     rng: Rng,
     radio_clock_control: RADIO_CLK,
-) -> Result<EspWifiController<'a>, WifiError> {
+) -> Result<EspWifiController<'_>, WifiError> {
     let wifi_controller_result = init(timg0.timer0, rng, radio_clock_control);
     if wifi_controller_result.is_err() {
         return Err(WifiError::FailedToInitializeTheWifiDevice);
