@@ -75,7 +75,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Clippy Output
         working-directory: ${{ matrix.path }}
-        run: cargo clippy --no-deps --all-features --manifest-path ${{ matrix.path }}/Cargo.toml
+        run: cargo clippy --no-deps --all-features
 
 
   # cargo-semver-checks-action doesn't currently support specifying a base version manually.
