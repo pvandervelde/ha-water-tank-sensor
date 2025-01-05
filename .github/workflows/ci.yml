@@ -25,7 +25,6 @@ jobs:
         with:
           target: riscv32imac-unknown-none-elf
           toolchain: stable
-          components: rust-src, rustfmt, clippy
       - name: Enable caching
         uses: Swatinem/rust-cache@v2
       - name: Run command
