@@ -27,8 +27,42 @@ opt-level = 's'
 overflow-checks = false
 
 [dependencies]
-blocking-network-stack = { git = "https://github.com/bjoernQ/blocking-network-stack.git", rev = "1c581661d78e0cf0f17b936297179b993fb149d7" }
+# Memory & thread
+critical-section = "1.2.0"
+heapless = { version = "0.8.0", default-features = false }
+scopeguard = { version = "1.2.0", default-features = false }
+static_cell = { version = "2.1.0", default-features = false }
+
+# IO
 embedded-io = { version = "0.6.1", default-features = false }
+
+# observability
+log = { version = "0.4.22", default-features = false }
+
+# Embassy
+embassy-executor = { version = "0.6", default-features = false, features = [
+    "task-arena-size-81920",
+] }
+embassy-sync = { version = "0.6", default-features = false }
+embassy-time = { version = "0.3", default-features = false, features = [
+    "generic-queue",
+] }
+embassy-net = { version = "0.5", default-features = false, features = [
+    "dhcpv4",
+    "dns",
+    "tcp",
+    "udp",
+] }
+
+# Hardware Abstraction Layer
+embedded-hal = { version = "1", default-features = false }
+embedded-hal-async = { version = "1", default-features = false }
+embedded-hal-bus = { version = "0.2", default-features = false, features = [
+    "async",
+] }
+embedded-io-async = { version = "0.6", default-features = false }
+
+# esp32
 esp-alloc = { version = "0.5.0" }
 esp-backtrace = { version = "0.14.2", features = [
     "esp32c6",
@@ -36,11 +70,9 @@ esp-backtrace = { version = "0.14.2", features = [
     "panic-handler",
     "println",
 ] }
-
 esp-hal = { version = "0.22.0", features = ["esp32c6", "log"] }
-
+esp-hal-embassy = { version = "0.5", features = ["esp32c6", "executors"] }
 esp-println = { version = "0.12.0", features = ["esp32c6"] }
-
 esp-wifi = { version = "0.11.0", default-features = false, features = [
     "esp32c6",
     "utils",
@@ -49,14 +81,30 @@ esp-wifi = { version = "0.11.0", default-features = false, features = [
     "log",
 ] }
 
-heapless = { version = "0.8.0", default-features = false }
+#network
+blocking-network-stack = { git = "https://github.com/bjoernQ/blocking-network-stack.git", rev = "1c581661d78e0cf0f17b936297179b993fb149d7" }
+reqwless = { version = "0.13", default-features = false, features = [
+    "embedded-tls",
+    "log",
+] }
 smoltcp = { version = "0.11.0", default-features = false, features = [
     "medium-ethernet",
     "socket-raw",
 ] }
-critical-section = "1.2.0"
+
+# error handling
 anyhow = { version = "1.0.95", default-features = false }
 thiserror = { version = "2.0.9", default-features = false }
-static_cell = { version = "2.1.0", default-features = false }
-log = { version = "0.4.22", default-features = false }
-scopeguard = { version = "1.2.0", default-features = false }
+
+# Sensor
+bme280-rs = { version = "0.3", default-features = false, features = [
+    "async",
+    "uom",
+] }
+uom = { version = "0.36", default-features = false, features = ["f32", "si"] }
+
+# Time
+time = { version = "0.3", default-features = false }
+
+# Random
+rand_core = { version = "0.6", default-features = false }

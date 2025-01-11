@@ -1,10 +1,4 @@
-// Copyright Claudio Mattera 2024.
-//
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at http://mozilla.org/MPL/2.0/.
-//
-// Original from here: https://github.com/claudiomattera/esp32c3-embassy/blob/master/esp32c3-embassy/src/logging.rs
+// Based on code from here: https://github.com/claudiomattera/esp32c3-embassy/
 
 //! Functions for setting up the logging system
 
