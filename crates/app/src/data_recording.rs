@@ -1,111 +1,95 @@
+use core::fmt::Write;
+
+use embassy_net::tcp::client::TcpClientState;
+use embassy_net::Stack;
+use embassy_net::{dns::DnsSocket, tcp::client::TcpClient};
+use embassy_sync::channel::Sender;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Receiver};
+
+use heapless::String;
+
+use log::error;
 use log::info;
+
+use rand_core::RngCore as _;
+
+use reqwless::client::{HttpClient, TlsConfig, TlsVerify};
+use reqwless::{
+    headers::ContentType,
+    request::{Method, RequestBuilder},
+};
+
+use thiserror::Error;
+
 use time::OffsetDateTime;
 use uom::si::{pressure::hectopascal, ratio::percent, thermodynamic_temperature::degree_celsius};
 
-use crate::http::ClientTrait as HttpClientTrait;
-use crate::sensor_data::{Reading, Sample};
+use crate::random::RngWrapper;
+use crate::sensor_data::{EnvironmentalData, Reading};
 
-/// Extend an HTTP client for sending data to Grafana
-pub trait GrafanaApiClient: HttpClientTrait {
-    /// Fetch the current time
-    async fn upload_sensor_data(&mut self) -> Result<(), Error> {
-        let url = "https://worldtimeapi.org/api/timezone/Pacific/Auckland.txt";
+const GRAFANA_CLOUD_URL: &str = env!("GRAFANA_METRICS_URL");
+const GRAFANA_USER_NAME: &str = env!("GRAFANA_USER_NAME");
+const GRAFANA_API_KEY: &str = env!("GRAFANA_METRICS_API_KEY");
 
-        let response = self.send_request(url).await?;
+/// A clock error
+#[derive(Error, Debug)]
+pub enum Error {
+    /// Error caused when a conversion has failed.
+    #[error("The conversion failed.")]
+    ConversionFailed,
 
-        let text = from_utf8(&response)?;
-        let mut timestamp: Option<u64> = None;
-        let mut offset: Option<i32> = None;
-        for line in text.lines() {
-            trace!("Line: \"{line}\"");
-            if let Some(timestamp_string) = line.strip_prefix("unixtime: ") {
-                debug!("Parse line \"{line}\"");
-                let timestamp_: u64 = timestamp_string.parse()?;
+    #[error("The response code does not indicate success.")]
+    NonSuccessResponseCode,
 
-                debug!("Current time is {timestamp_}");
-                timestamp = Some(timestamp_);
-            }
-            if let Some(offset_string) = line.strip_prefix("raw_offset: ") {
-                debug!("Parse line \"{line}\"");
-                let offset_: i32 = offset_string.parse()?;
-
-                debug!("Current offset is {offset_}");
-                offset = Some(offset_);
-            }
-        }
-
-        if let (Some(timestamp), Some(offset)) = (timestamp, offset) {
-            let offset = UtcOffset::from_whole_seconds(offset)?;
-
-            #[allow(clippy::cast_possible_wrap, reason = "Timestamp will fit an i64")]
-            let timestamp = timestamp as i64;
-
-            let utc = OffsetDateTime::from_unix_timestamp(timestamp)?;
-            let local = utc
-                .checked_to_offset(offset)
-                .ok_or(Error::InvalidInOffset)?;
-            Ok(local)
-        } else {
-            Err(Error::Unknown)
-        }
-    }
-
-    async fn send_to_grafana(
-        client: &mut HttpClient<'_, WifiDevice<'static>>,
-        metrics: &str,
-    ) -> Result<(), &'static str> {
-        let mut headers = Headers::new();
-        headers.set_authorization_basic("", GRAFANA_API_KEY);
-        headers.set_content_type(ContentType::TextPlain);
-
-        let request = RequestBuilder::new(GRAFANA_CLOUD_URL)
-            .method(Method::Post)
-            .headers(headers)
-            .body(metrics.as_bytes());
-
-        match client.request(request).await {
-            Ok(response) => {
-                if response.status.is_success() {
-                    Ok(())
-                } else {
-                    Err("Non-success status code")
-                }
-            }
-            Err(_) => Err("Request failed"),
-        }
-    }
-
-    fn format_metrics(temperature: f32, humidity: f32, pressure: f32) -> String<256> {
-        let mut buffer: String<256> = String::new();
-
-        write!(
-            buffer,
-            "# TYPE temperature_celsius gauge\ntemperature_celsius {}\n",
-            temperature
-        )
-        .unwrap();
-        write!(
-            buffer,
-            "# TYPE humidity_percent gauge\nhumidity_percent {}\n",
-            humidity
-        )
-        .unwrap();
-        write!(
-            buffer,
-            "# TYPE pressure_hpa gauge\npressure_hpa {}\n",
-            pressure
-        )
-        .unwrap();
-
-        buffer
-    }
+    #[error("The request failed to send.")]
+    RequestFailed,
 }
 
-impl WorldTimeApiClient for HttpClient {}
+fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<256> {
+    let timestamp = environmental_data.0;
+    let environmental_sample = environmental_data.1;
+
+    let temperature = environmental_sample.temperature;
+    let humidity = environmental_sample.humidity;
+    let air_pressure = environmental_sample.pressure;
+
+    // battery_voltage: f32,
+    // pressure_sensor_voltage: f32,
+    // liquid_height: f32,
+
+    let unix_timestamp = timestamp.unix_timestamp_nanos() / 1_000_000; // Convert to milliseconds
+    let mut buffer: String<256> = String::new();
+
+    write!(
+        buffer,
+        "# TYPE boot_count counter\nboot_count {} {}\n",
+        boot_count, unix_timestamp
+    )
+    .unwrap();
+    write!(
+        buffer,
+        "# TYPE temperature_celsius gauge\ntemperature_celsius {} {}\n",
+        temperature.value, unix_timestamp
+    )
+    .unwrap();
+    write!(
+        buffer,
+        "# TYPE humidity_percent gauge\nhumidity_percent {} {}\n",
+        humidity.value, unix_timestamp
+    )
+    .unwrap();
+    write!(
+        buffer,
+        "# TYPE pressure_hpa gauge\npressure_hpa {} {}\n",
+        air_pressure.value, unix_timestamp
+    )
+    .unwrap();
+
+    buffer
+}
 
 /// Print a sample to log
-fn log_sample(time: &OffsetDateTime, sample: &Sample) {
+fn log_sample(time: &OffsetDateTime, sample: &EnvironmentalData) {
     let temperature = sample.temperature.get::<degree_celsius>();
     let humidity = sample.humidity.get::<percent>();
     let pressure = sample.pressure.get::<hectopascal>();
@@ -116,16 +100,93 @@ fn log_sample(time: &OffsetDateTime, sample: &Sample) {
     info!(" ┗ Pressure:    {:.2} hPa", pressure);
 }
 
-#[embassy_executor::task]
-pub async fn update_task(receiver: Receiver<'static, NoopRawMutex, Reading, 3>) {
-    // For now write the data to the output
+async fn receive_environmental_data(
+    receiver: &Receiver<'static, NoopRawMutex, Reading, 3>,
+) -> Result<Reading, Error> {
+    info!("Wait for message from sensor");
 
-    loop {
-        info!("Wait for message from sensor");
-        let reading = receiver.receive().await;
-        let now = reading.0;
-        let sample = reading.1;
+    let reading = receiver.receive().await;
+    log_sample(&reading.0, &reading.1);
 
-        log_sample(&now, &sample);
+    Ok(reading)
+}
+
+async fn send_data_to_grafana<'a>(
+    stack: Stack<'a>,
+    rng_wrapper: &mut RngWrapper,
+    boot_count: u32,
+    environmental_data: Reading,
+) -> Result<(), Error> {
+    info!("Wait for message from sensor");
+
+    let metrics = format_metrics(boot_count, environmental_data);
+    let bytes = metrics.as_bytes();
+
+    let dns_socket = DnsSocket::new(stack);
+
+    let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
+    let tcp_client = TcpClient::new(stack, &tcp_client_state);
+
+    let seed = rng_wrapper.next_u64();
+    let mut read_record_buffer = [0_u8; 16640];
+    let mut write_record_buffer = [0_u8; 16640];
+
+    let tls_config = TlsConfig::new(
+        seed,
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+        TlsVerify::None,
+    );
+
+    let mut client = HttpClient::new_with_tls(&tcp_client, &dns_socket, tls_config);
+
+    let mut rx_buf = [0; 4096];
+    let mut request = client
+        .request(Method::POST, GRAFANA_CLOUD_URL)
+        .await
+        .unwrap()
+        .basic_auth(GRAFANA_USER_NAME, GRAFANA_API_KEY)
+        .content_type(ContentType::TextPlain)
+        .body(bytes);
+    let response = request.send(&mut rx_buf).await;
+
+    match response {
+        Ok(r) => {
+            if r.status.is_successful() {
+                Ok(())
+            } else {
+                Err(Error::NonSuccessResponseCode)
+            }
+        }
+        Err(_) => Err(Error::RequestFailed),
     }
+}
+
+#[embassy_executor::task]
+pub async fn update_task(
+    stack: Stack<'static>,
+    mut rng_wrapper: RngWrapper,
+    environmental_data_receiver: Receiver<'static, NoopRawMutex, Reading, 3>,
+    //ad_data_receiver: Receiver<'static, NoopRawMutex, Reading, 3>,
+    data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
+    boot_count: u32,
+) {
+    info!("Waiting for sensor data to arrive ...");
+
+    // Get data from environment sensor
+    let reading = match receive_environmental_data(&environmental_data_receiver).await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to read the environmental data: {e:?}");
+            return;
+        }
+    };
+
+    // Get data from AD converter
+    info!("Sending data ...");
+    if let Err(error) = send_data_to_grafana(stack, &mut rng_wrapper, boot_count, reading).await {
+        error!("Could not send data to Grafana: {error:?}");
+    }
+
+    data_sent_sender.send(true).await;
 }

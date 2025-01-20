@@ -47,6 +47,7 @@ use esp_hal_embassy::init as initialize_embassy;
 
 use scopeguard::guard;
 use scopeguard::ScopeGuard;
+use thiserror::Error;
 use time::OffsetDateTime;
 
 use heapless::String;
@@ -66,7 +67,6 @@ mod data_recording;
 use self::data_recording::update_task as send_data_task;
 
 mod http;
-use self::http::Client as HttpClient;
 
 mod logging;
 use self::logging::setup as setup_logging;
@@ -75,11 +75,11 @@ mod random;
 use self::random::RngWrapper;
 
 mod sensor;
-use self::sensor::sample_task as sample_sensor_task;
+use self::sensor::read_environmental_data_task as sample_sensor_task;
 
 mod sensor_data;
+use sensor_data::EnvironmentalData;
 use sensor_data::Reading;
-use sensor_data::Sample;
 
 mod sleep;
 use self::sleep::enter_deep as enter_deep_sleep;
@@ -87,16 +87,11 @@ use self::sleep::enter_deep as enter_deep_sleep;
 mod wifi;
 use self::wifi::Error as WifiError;
 
-mod worldtimeapi;
-
-/// Period to wait between readings
-const SAMPLING_PERIOD: Duration = Duration::from_secs(10);
-
 /// Duration of deep sleep
 const DEEP_SLEEP_DURATION: Duration = Duration::from_secs(30);
 
-/// Period to wait before going to deep sleep
-const AWAKE_PERIOD: Duration = Duration::from_secs(30);
+/// Period to wait after the data has been sent, before going to deep sleep
+const WAIT_AFTER_SENT_PERIOD: Duration = Duration::from_secs(5);
 
 /// SSID for WiFi network
 const WIFI_SSID: &str = env!("WIFI_SSID");
@@ -107,26 +102,12 @@ const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 /// Size of heap for dynamically-allocated memory
 const HEAP_MEMORY_SIZE: usize = 72 * 1024;
 
-/// A channel between sensor sampler and display updater
-static CHANNEL: StaticCell<Channel<NoopRawMutex, Reading, 3>> = StaticCell::new();
+/// A channel between all the data processors and the main function. Used to let
+/// the main function know when the work is done.
+static DATA_SEND_CHANNEL: StaticCell<Channel<NoopRawMutex, bool, 3>> = StaticCell::new();
 
-/// Size of SPI DMA descriptors
-const DESCRIPTORS_SIZE: usize = 8 * 3;
-
-/// Descriptors for SPI DMA
-static DESCRIPTORS: StaticCell<[DmaDescriptor; DESCRIPTORS_SIZE]> = StaticCell::new();
-
-/// RX descriptors for SPI DMA
-static RX_DESCRIPTORS: StaticCell<[DmaDescriptor; DESCRIPTORS_SIZE]> = StaticCell::new();
-
-/// Size of SPI DMA buffers
-const BUFFERS_SIZE: usize = 8 * 3;
-
-/// Buffer for SPI DMA
-static BUFFER: StaticCell<[u8; BUFFERS_SIZE]> = StaticCell::new();
-
-/// RX Buffer for SPI DMA
-static RX_BUFFER: StaticCell<[u8; BUFFERS_SIZE]> = StaticCell::new();
+/// A channel between sensor sampler and data processor
+static ENVIRONMENTAL_CHANNEL: StaticCell<Channel<NoopRawMutex, Reading, 3>> = StaticCell::new();
 
 /// Stored boot count between deep sleep cycles
 ///
@@ -136,49 +117,32 @@ static RX_BUFFER: StaticCell<[u8; BUFFERS_SIZE]> = StaticCell::new();
 static BOOT_COUNT: SyncUnsafeCell<u32> = SyncUnsafeCell::new(0);
 
 /// An error
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum Error {
     /// An impossible error existing only to satisfy the type system
-    Impossible(Infallible),
+    #[error("An impossible error existing only to satisfy the type system")]
+    Impossible {
+        #[from]
+        source: Infallible,
+    },
 
     /// Error while parsing SSID or password
+    #[error("Error while parsing SSID or password")]
     ParseCredentials,
 
     /// An error within WiFi operations
-    #[expect(unused, reason = "Never read directly")]
-    Wifi(WifiError),
+    #[error("An error within WiFi operations")]
+    Wifi {
+        #[from]
+        source: WifiError,
+    },
 
     /// An error within clock operations
-    #[expect(unused, reason = "Never read directly")]
-    Clock(ClockError),
-
-    /// An error within creation of DMA buffers
-    #[expect(unused, reason = "Never read directly")]
-    DmaBuffer(DmaBufError),
-}
-
-impl From<Infallible> for Error {
-    fn from(error: Infallible) -> Self {
-        Self::Impossible(error)
-    }
-}
-
-impl From<WifiError> for Error {
-    fn from(error: WifiError) -> Self {
-        Self::Wifi(error)
-    }
-}
-
-impl From<ClockError> for Error {
-    fn from(error: ClockError) -> Self {
-        Self::Clock(error)
-    }
-}
-
-impl From<DmaBufError> for Error {
-    fn from(error: DmaBufError) -> Self {
-        Self::DmaBuffer(error)
-    }
+    #[error("An error within clock operations")]
+    Clock {
+        #[from]
+        source: ClockError,
+    },
 }
 
 async fn connect_to_wifi<'a>(
@@ -202,23 +166,21 @@ async fn connect_to_wifi<'a>(
     let (controller, stack) =
         wifi::connect(spawner, timg0, rng, wifi, radio_clk, (ssid, password)).await?;
     let guard = guard(controller, |mut c| {
-        c.disconnect();
+        let _ = c.disconnect();
     });
 
     Ok((guard, stack))
 }
 
 /// Load clock from RTC memory of from server
-async fn load_clock(spawner: Spawner, client: &mut HttpClient) -> Result<Clock, Error> {
+async fn load_clock<'a>(stack: Stack<'_>, rng_wrapper: &mut RngWrapper) -> Result<Clock, Error> {
     let clock = if let Some(clock) = Clock::from_rtc_memory() {
         info!("Clock loaded from RTC memory");
         clock
     } else {
         info!("Synchronize clock from server");
 
-        let clock = Clock::from_server(client).await?;
-
-        clock
+        Clock::from_server(stack, rng_wrapper).await?
     };
 
     Ok(clock)
@@ -238,13 +200,13 @@ async fn main(spawner: Spawner) {
     info!("Current boot count = {boot_count}");
     *boot_count += 1;
 
-    if let Err(error) = main_fallible(spawner).await {
+    if let Err(error) = main_fallible(spawner, *boot_count).await {
         error!("Error while running firmware: {error:?}");
     }
 }
 
 /// Main task that can return an error
-async fn main_fallible(spawner: Spawner) -> Result<(), Error> {
+async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
     let peripherals = initialize_esp_hal({
         let mut config = EspConfig::default();
         config.cpu_clock = CpuClock::max();
@@ -260,7 +222,7 @@ async fn main_fallible(spawner: Spawner) -> Result<(), Error> {
 
         let rng = Rng::new(peripherals.RNG);
 
-        let (wifi_guard, stack) = connect_to_wifi(
+        let (mut wifi_guard, stack) = connect_to_wifi(
             spawner,
             peripherals.TIMG0,
             peripherals.WIFI,
@@ -269,13 +231,28 @@ async fn main_fallible(spawner: Spawner) -> Result<(), Error> {
         )
         .await?;
 
-        let mut http_client = HttpClient::new(stack, RngWrapper::from(rng));
+        let mut rng_wrapper = RngWrapper::from(rng);
 
-        let clock = load_clock(spawner, &mut http_client).await?;
+        // Turn on the power for the pressure sensor
+        // Record time
+
+        let clock = load_clock(stack, &mut rng_wrapper).await?;
         info!("Now is {}", clock.now()?);
 
+        let data_sent_channel: &'static mut _ = DATA_SEND_CHANNEL.init(Channel::new());
+        let data_sent_receiver = data_sent_channel.receiver();
+        let data_sent_sender = data_sent_channel.sender();
+
         info!("Setup data sending task");
-        let sender = setup_data_transmitting_task(spawner)?;
+        let environmental_data_sender = setup_data_transmitting_task(
+            spawner,
+            stack,
+            rng_wrapper,
+            data_sent_sender,
+            boot_count,
+        )?;
+
+        // Number of samples
 
         info!("Setup sensor task");
         setup_sensor_task(
@@ -287,30 +264,64 @@ async fn main_fallible(spawner: Spawner) -> Result<(), Error> {
                 rng,
             },
             clock.clone(),
-            sender,
+            environmental_data_sender,
         );
 
-        info!("Stay awake for {}s", AWAKE_PERIOD.as_secs());
-        Timer::after(AWAKE_PERIOD).await;
+        // Wait for the pressure sensor to be stable
+
+        // Wait at least x milliseconds
+        // Then check the voltage on the pressure sensor
+
+        // Take pressure sensor readings
+
+        // Turn off power to the pressure sensor when we're done taking the recordings
+
+        let was_processed = data_sent_receiver.receive().await;
+        if !was_processed {
+            error!("Failed to process the data");
+        }
+
+        info!("Wait for {}s", WAIT_AFTER_SENT_PERIOD.as_secs());
+        Timer::after(WAIT_AFTER_SENT_PERIOD).await;
+
+        // Shut down sensors
+
+        // Shut down processing
 
         clock.save_to_rtc_memory(DEEP_SLEEP_DURATION);
 
-        // wifi guard goes out of scope here so it should shut down
+        // If something goes wrong before this point then the guard is dropped which causes
+        // the wifi to disconnect. If that
+        let connected_result = wifi_guard.is_connected();
+        if connected_result.is_ok() && connected_result.unwrap() {
+            let _ = wifi_guard.disconnect();
+        }
     }
 
+    info!("Entering deep sleep for {}s", DEEP_SLEEP_DURATION.as_secs());
     enter_deep_sleep(peripherals.LPWR, DEEP_SLEEP_DURATION.into());
 }
 
 fn setup_data_transmitting_task(
     spawner: Spawner,
-) -> Result<Sender<'static, NoopRawMutex, (OffsetDateTime, Sample), 3>, Error> {
+    stack: Stack<'static>,
+    rng_wrapper: RngWrapper,
+    data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
+    boot_count: u32,
+) -> Result<Sender<'static, NoopRawMutex, (OffsetDateTime, EnvironmentalData), 3>, Error> {
     info!("Create channel");
-    let channel: &'static mut _ = CHANNEL.init(Channel::new());
+    let channel: &'static mut _ = ENVIRONMENTAL_CHANNEL.init(Channel::new());
     let receiver = channel.receiver();
     let sender = channel.sender();
 
     info!("Spawn tasks");
-    spawner.must_spawn(send_data_task(receiver));
+    spawner.must_spawn(send_data_task(
+        stack,
+        rng_wrapper,
+        receiver,
+        data_sent_sender,
+        boot_count,
+    ));
 
     Ok(sender)
 }
@@ -334,7 +345,7 @@ fn setup_sensor_task(
     spawner: Spawner,
     peripherals: SensorPeripherals,
     clock: Clock,
-    sender: Sender<'static, NoopRawMutex, (OffsetDateTime, Sample), 3>,
+    sender: Sender<'static, NoopRawMutex, (OffsetDateTime, EnvironmentalData), 3>,
 ) {
     info!("Create I²C bus");
     let i2c_config = I2cConfig {
@@ -346,11 +357,5 @@ fn setup_sensor_task(
         .with_scl(peripherals.scl)
         .into_async();
 
-    spawner.must_spawn(sample_sensor_task(
-        i2c,
-        peripherals.rng,
-        sender,
-        clock,
-        SAMPLING_PERIOD,
-    ));
+    spawner.must_spawn(sample_sensor_task(i2c, peripherals.rng, sender, clock));
 }

@@ -4,8 +4,11 @@ runner = "espflash flash --monitor"
 [env]
 DEFMT_LOG = "info"
 ESP_LOG = "info"
-WIFI_SSID = "ssid-placeholder"
+GRAFANA_METRICS_API_KEY = "api-key-placeholder"
+GRAFANA_METRICS_URL = "https://metrics.example.com"
+GRAFANA_USER_NAME = "user-name-placeholder"
 WIFI_PASSWORD = "password-placeholder"
+WIFI_SSID = "ssid-placeholder"
 
 [build]
 rustflags = [

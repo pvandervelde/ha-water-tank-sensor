@@ -2,6 +2,7 @@
 
 //! Domain types
 
+use embassy_time::Duration;
 use esp_hal::rng::Rng;
 
 use uom::si::f32::Pressure;
@@ -15,20 +16,27 @@ use time::OffsetDateTime;
 
 use bme280_rs::Sample as Bme280Sample;
 
-/// A sample
+/// The number of samples that each measurement should take
+pub const NUMBER_OF_SAMPLES: usize = 5;
+
+/// Period to wait between readings
+pub const TIME_BETWEEN_SAMPLES: Duration = Duration::from_millis(100);
+
+/// The data recorded from the BME280. It provides the environmental data (temperature, pressure, humidity)
+/// for the enclosure.
 #[derive(Clone, Debug, Default)]
-pub struct Sample {
+pub struct EnvironmentalData {
     /// Temperature
     pub temperature: Temperature,
 
     /// Humidity
     pub humidity: Humidity,
 
-    /// Pressure
+    /// Air Pressure
     pub pressure: Pressure,
 }
 
-impl Sample {
+impl EnvironmentalData {
     /// Construct a random sample
     #[expect(clippy::cast_precision_loss, reason = "Acceptable precision loss")]
     pub fn random(rng: &mut Rng) -> Self {
@@ -48,7 +56,7 @@ impl Sample {
     }
 }
 
-impl From<(Temperature, Humidity, Pressure)> for Sample {
+impl From<(Temperature, Humidity, Pressure)> for EnvironmentalData {
     fn from((temperature, humidity, pressure): (Temperature, Humidity, Pressure)) -> Self {
         Self {
             temperature,
@@ -58,7 +66,7 @@ impl From<(Temperature, Humidity, Pressure)> for Sample {
     }
 }
 
-impl TryFrom<Bme280Sample> for Sample {
+impl TryFrom<Bme280Sample> for EnvironmentalData {
     type Error = Error;
 
     fn try_from(sample: Bme280Sample) -> Result<Self, Self::Error> {
@@ -73,8 +81,10 @@ impl TryFrom<Bme280Sample> for Sample {
     }
 }
 
+// AD converter data
+
 /// A reading, i.e. a pair (time, sample)
-pub type Reading = (OffsetDateTime, Sample);
+pub type Reading = (OffsetDateTime, EnvironmentalData);
 
 /// An error
 #[derive(Debug)]

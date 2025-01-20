@@ -45,6 +45,8 @@ use esp_hal::Blocking;
 
 use heapless::String;
 
+use thiserror::Error;
+
 use static_cell::StaticCell;
 
 use rand_core::RngCore as _;
@@ -61,13 +63,15 @@ static WIFI_CONTROLLER: StaticCell<EspWifiController<'static>> = StaticCell::new
 pub static STOP_WIFI_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Error within WiFi connection
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
     /// Error during WiFi initialization
-    WifiInitialization(#[expect(unused, reason = "Never read directly")] WifiInitializationError),
+    #[error("Failed to initialize the Wifi.")]
+    WifiInitialization(WifiInitializationError),
 
     /// Error during WiFi operation
-    Wifi(#[expect(unused, reason = "Never read directly")] EspWifiError),
+    #[error("An error occured with the Wifi.")]
+    Wifi(EspWifiError),
 }
 
 impl From<WifiInitializationError> for Error {
