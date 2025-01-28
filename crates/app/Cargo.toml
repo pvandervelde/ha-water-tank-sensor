@@ -83,6 +83,9 @@ esp-wifi = { version = "0.11.0", default-features = false, features = [
 
 #network
 blocking-network-stack = { git = "https://github.com/bjoernQ/blocking-network-stack.git", rev = "1c581661d78e0cf0f17b936297179b993fb149d7" }
+embedded-tls = { version = "0.17.0", default-features = false, features = [
+    "log",
+] }
 reqwless = { version = "0.13", default-features = false, features = [
     "embedded-tls",
     "log",
@@ -105,6 +108,11 @@ uom = { version = "0.36", default-features = false, features = ["f32", "si"] }
 
 # Time
 time = { version = "0.3", default-features = false }
+sntpc = { version = "0.5.2", default-features = false, features = [
+    "embassy-socket",
+    "log",
+] }
 
 # Random
 rand_core = { version = "0.6", default-features = false }
+hifitime = { version = "4.0.2", default-features = false }

@@ -12,7 +12,6 @@ use log::info;
 
 use embassy_executor::Spawner;
 
-use embassy_time::Duration;
 use embassy_time::Timer;
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -48,7 +47,6 @@ use esp_hal_embassy::init as initialize_embassy;
 use scopeguard::guard;
 use scopeguard::ScopeGuard;
 use thiserror::Error;
-use time::OffsetDateTime;
 
 use heapless::String;
 
@@ -66,6 +64,8 @@ use self::clock::Error as ClockError;
 mod data_recording;
 use self::data_recording::update_task as send_data_task;
 
+mod device_meta;
+
 mod http;
 
 mod logging;
@@ -78,7 +78,6 @@ mod sensor;
 use self::sensor::read_environmental_data_task as sample_sensor_task;
 
 mod sensor_data;
-use sensor_data::EnvironmentalData;
 use sensor_data::Reading;
 
 mod sleep;
@@ -88,10 +87,10 @@ mod wifi;
 use self::wifi::Error as WifiError;
 
 /// Duration of deep sleep
-const DEEP_SLEEP_DURATION: Duration = Duration::from_secs(30);
+const DEEP_SLEEP_DURATION_IN_SECONDS: u32 = 30;
 
 /// Period to wait after the data has been sent, before going to deep sleep
-const WAIT_AFTER_SENT_PERIOD: Duration = Duration::from_secs(5);
+const WAIT_AFTER_SENT_PERIOD_IN_SECONDS: u64 = 5;
 
 /// SSID for WiFi network
 const WIFI_SSID: &str = env!("WIFI_SSID");
@@ -166,6 +165,7 @@ async fn connect_to_wifi<'a>(
     let (controller, stack) =
         wifi::connect(spawner, timg0, rng, wifi, radio_clk, (ssid, password)).await?;
     let guard = guard(controller, |mut c| {
+        info!("Disconnecting from wifi ...");
         let _ = c.disconnect();
     });
 
@@ -173,14 +173,14 @@ async fn connect_to_wifi<'a>(
 }
 
 /// Load clock from RTC memory of from server
-async fn load_clock<'a>(stack: Stack<'_>, rng_wrapper: &mut RngWrapper) -> Result<Clock, Error> {
+async fn load_clock<'a>(stack: Stack<'_>) -> Result<Clock, Error> {
     let clock = if let Some(clock) = Clock::from_rtc_memory() {
         info!("Clock loaded from RTC memory");
         clock
     } else {
         info!("Synchronize clock from server");
 
-        Clock::from_server(stack, rng_wrapper).await?
+        Clock::from_server(stack).await?
     };
 
     Ok(clock)
@@ -231,13 +231,13 @@ async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
         )
         .await?;
 
-        let mut rng_wrapper = RngWrapper::from(rng);
+        let rng_wrapper = RngWrapper::from(rng);
 
         // Turn on the power for the pressure sensor
         // Record time
 
-        let clock = load_clock(stack, &mut rng_wrapper).await?;
-        info!("Now is {}", clock.now()?);
+        let clock = load_clock(stack).await?;
+        info!("Now is {}", clock.now());
 
         let data_sent_channel: &'static mut _ = DATA_SEND_CHANNEL.init(Channel::new());
         let data_sent_receiver = data_sent_channel.receiver();
@@ -276,30 +276,45 @@ async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
 
         // Turn off power to the pressure sensor when we're done taking the recordings
 
+        info!("Waiting for sensors to complete tasks");
         let was_processed = data_sent_receiver.receive().await;
         if !was_processed {
             error!("Failed to process the data");
         }
 
-        info!("Wait for {}s", WAIT_AFTER_SENT_PERIOD.as_secs());
-        Timer::after(WAIT_AFTER_SENT_PERIOD).await;
+        info!("Wait for {}s", WAIT_AFTER_SENT_PERIOD_IN_SECONDS);
+        Timer::after(embassy_time::Duration::from_secs(
+            WAIT_AFTER_SENT_PERIOD_IN_SECONDS,
+        ))
+        .await;
 
         // Shut down sensors
 
         // Shut down processing
 
-        clock.save_to_rtc_memory(DEEP_SLEEP_DURATION);
+        info!("Saving time to RTC memory ...");
+        clock.save_to_rtc_memory(hifitime::Duration::from_seconds(
+            DEEP_SLEEP_DURATION_IN_SECONDS as f64,
+        ));
 
         // If something goes wrong before this point then the guard is dropped which causes
         // the wifi to disconnect. If that
+        info!("Checking wifi status ...");
         let connected_result = wifi_guard.is_connected();
         if connected_result.is_ok() && connected_result.unwrap() {
+            info!("Disconnecting from wifi ...");
             let _ = wifi_guard.disconnect();
         }
     }
 
-    info!("Entering deep sleep for {}s", DEEP_SLEEP_DURATION.as_secs());
-    enter_deep_sleep(peripherals.LPWR, DEEP_SLEEP_DURATION.into());
+    info!(
+        "Entering deep sleep for {}s",
+        DEEP_SLEEP_DURATION_IN_SECONDS,
+    );
+    enter_deep_sleep(
+        peripherals.LPWR,
+        hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
+    );
 }
 
 fn setup_data_transmitting_task(
@@ -308,13 +323,13 @@ fn setup_data_transmitting_task(
     rng_wrapper: RngWrapper,
     data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
     boot_count: u32,
-) -> Result<Sender<'static, NoopRawMutex, (OffsetDateTime, EnvironmentalData), 3>, Error> {
+) -> Result<Sender<'static, NoopRawMutex, Reading, 3>, Error> {
     info!("Create channel");
     let channel: &'static mut _ = ENVIRONMENTAL_CHANNEL.init(Channel::new());
     let receiver = channel.receiver();
     let sender = channel.sender();
 
-    info!("Spawn tasks");
+    info!("Spawning data sending task");
     spawner.must_spawn(send_data_task(
         stack,
         rng_wrapper,
@@ -345,7 +360,7 @@ fn setup_sensor_task(
     spawner: Spawner,
     peripherals: SensorPeripherals,
     clock: Clock,
-    sender: Sender<'static, NoopRawMutex, (OffsetDateTime, EnvironmentalData), 3>,
+    sender: Sender<'static, NoopRawMutex, Reading, 3>,
 ) {
     info!("Create I²C bus");
     let i2c_config = I2cConfig {
@@ -357,5 +372,6 @@ fn setup_sensor_task(
         .with_scl(peripherals.scl)
         .into_async();
 
+    info!("Spawning environmental sensor task");
     spawner.must_spawn(sample_sensor_task(i2c, peripherals.rng, sender, clock));
 }

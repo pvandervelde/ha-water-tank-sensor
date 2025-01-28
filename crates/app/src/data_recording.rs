@@ -8,8 +8,9 @@ use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Receiver};
 
 use heapless::String;
 
-use log::error;
+use hifitime::Epoch;
 use log::info;
+use log::{debug, error};
 
 use rand_core::RngCore as _;
 
@@ -21,9 +22,10 @@ use reqwless::{
 
 use thiserror::Error;
 
-use time::OffsetDateTime;
+use uom::si::pressure::pascal;
 use uom::si::{pressure::hectopascal, ratio::percent, thermodynamic_temperature::degree_celsius};
 
+use crate::device_meta::DEVICE_LOCATION;
 use crate::random::RngWrapper;
 use crate::sensor_data::{EnvironmentalData, Reading};
 
@@ -34,10 +36,6 @@ const GRAFANA_API_KEY: &str = env!("GRAFANA_METRICS_API_KEY");
 /// A clock error
 #[derive(Error, Debug)]
 pub enum Error {
-    /// Error caused when a conversion has failed.
-    #[error("The conversion failed.")]
-    ConversionFailed,
-
     #[error("The response code does not indicate success.")]
     NonSuccessResponseCode,
 
@@ -45,7 +43,8 @@ pub enum Error {
     RequestFailed,
 }
 
-fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<256> {
+// Use the influx line protocol from here: https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/
+fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<512> {
     let timestamp = environmental_data.0;
     let environmental_sample = environmental_data.1;
 
@@ -57,31 +56,24 @@ fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<256> {
     // pressure_sensor_voltage: f32,
     // liquid_height: f32,
 
-    let unix_timestamp = timestamp.unix_timestamp_nanos() / 1_000_000; // Convert to milliseconds
-    let mut buffer: String<256> = String::new();
+    // The influx timestamp should be in nano seconds
+    let unix_timestamp = timestamp.to_unix_milliseconds() * 1e6;
+    let mut buffer: String<512> = String::new();
 
-    write!(
+    writeln!(
         buffer,
-        "# TYPE boot_count counter\nboot_count {} {}\n",
-        boot_count, unix_timestamp
+        "iot_stats,location={} boot_count={} {}",
+        DEVICE_LOCATION, boot_count, unix_timestamp
     )
     .unwrap();
-    write!(
+    writeln!(
         buffer,
-        "# TYPE temperature_celsius gauge\ntemperature_celsius {} {}\n",
-        temperature.value, unix_timestamp
-    )
-    .unwrap();
-    write!(
-        buffer,
-        "# TYPE humidity_percent gauge\nhumidity_percent {} {}\n",
-        humidity.value, unix_timestamp
-    )
-    .unwrap();
-    write!(
-        buffer,
-        "# TYPE pressure_hpa gauge\npressure_hpa {} {}\n",
-        air_pressure.value, unix_timestamp
+        "environment,location={} temperature={} humidity={} pressure={} {}",
+        DEVICE_LOCATION,
+        temperature.get::<degree_celsius>(),
+        humidity.get::<percent>(),
+        air_pressure.get::<pascal>(),
+        unix_timestamp
     )
     .unwrap();
 
@@ -89,7 +81,7 @@ fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<256> {
 }
 
 /// Print a sample to log
-fn log_sample(time: &OffsetDateTime, sample: &EnvironmentalData) {
+fn log_sample(time: &Epoch, sample: &EnvironmentalData) {
     let temperature = sample.temperature.get::<degree_celsius>();
     let humidity = sample.humidity.get::<percent>();
     let pressure = sample.pressure.get::<hectopascal>();
@@ -117,7 +109,7 @@ async fn send_data_to_grafana<'a>(
     boot_count: u32,
     environmental_data: Reading,
 ) -> Result<(), Error> {
-    info!("Wait for message from sensor");
+    info!("Sending data to grafana ...");
 
     let metrics = format_metrics(boot_count, environmental_data);
     let bytes = metrics.as_bytes();
@@ -138,27 +130,36 @@ async fn send_data_to_grafana<'a>(
         TlsVerify::None,
     );
 
+    debug!("Creating HTTP client ...");
     let mut client = HttpClient::new_with_tls(&tcp_client, &dns_socket, tls_config);
 
+    debug!("Creating request ...");
     let mut rx_buf = [0; 4096];
-    let mut request = client
-        .request(Method::POST, GRAFANA_CLOUD_URL)
-        .await
-        .unwrap()
-        .basic_auth(GRAFANA_USER_NAME, GRAFANA_API_KEY)
+    let mut resource = client.resource(GRAFANA_CLOUD_URL).await.unwrap();
+    let response = resource
+        .post("push/influx/write")
         .content_type(ContentType::TextPlain)
+        .basic_auth(GRAFANA_USER_NAME, GRAFANA_API_KEY)
         .body(bytes);
-    let response = request.send(&mut rx_buf).await;
 
+    debug!("Sending request ...");
+    let response = response.send(&mut rx_buf).await;
+
+    debug!("Processing response ...");
     match response {
         Ok(r) => {
             if r.status.is_successful() {
+                debug!("Send data to grafana. Status code: {:?}", r.status);
                 Ok(())
             } else {
+                error!("Failed to send data to grafana: Status code {:?}", r.status,);
                 Err(Error::NonSuccessResponseCode)
             }
         }
-        Err(_) => Err(Error::RequestFailed),
+        Err(e) => {
+            error!("Failed to send data to grafana: error {:?}", e);
+            Err(Error::RequestFailed)
+        }
     }
 }
 
@@ -171,8 +172,6 @@ pub async fn update_task(
     data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
     boot_count: u32,
 ) {
-    info!("Waiting for sensor data to arrive ...");
-
     // Get data from environment sensor
     let reading = match receive_environmental_data(&environmental_data_receiver).await {
         Ok(r) => r,
@@ -183,7 +182,6 @@ pub async fn update_task(
     };
 
     // Get data from AD converter
-    info!("Sending data ...");
     if let Err(error) = send_data_to_grafana(stack, &mut rng_wrapper, boot_count, reading).await {
         error!("Could not send data to Grafana: {error:?}");
     }

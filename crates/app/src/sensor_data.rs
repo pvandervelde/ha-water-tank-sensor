@@ -2,9 +2,9 @@
 
 //! Domain types
 
-use embassy_time::Duration;
 use esp_hal::rng::Rng;
 
+use hifitime::Epoch;
 use uom::si::f32::Pressure;
 use uom::si::f32::Ratio as Humidity;
 use uom::si::f32::ThermodynamicTemperature as Temperature;
@@ -12,15 +12,13 @@ use uom::si::pressure::hectopascal;
 use uom::si::ratio::percent;
 use uom::si::thermodynamic_temperature::degree_celsius;
 
-use time::OffsetDateTime;
-
 use bme280_rs::Sample as Bme280Sample;
 
 /// The number of samples that each measurement should take
 pub const NUMBER_OF_SAMPLES: usize = 5;
 
-/// Period to wait between readings
-pub const TIME_BETWEEN_SAMPLES: Duration = Duration::from_millis(100);
+/// Period to wait between readings (100 milliseconds, aka 0.1 seconds)
+pub const TIME_BETWEEN_SAMPLES_IN_SECONDS: f64 = 0.1;
 
 /// The data recorded from the BME280. It provides the environmental data (temperature, pressure, humidity)
 /// for the enclosure.
@@ -84,7 +82,7 @@ impl TryFrom<Bme280Sample> for EnvironmentalData {
 // AD converter data
 
 /// A reading, i.e. a pair (time, sample)
-pub type Reading = (OffsetDateTime, EnvironmentalData);
+pub type Reading = (Epoch, EnvironmentalData);
 
 /// An error
 #[derive(Debug)]
