@@ -57,7 +57,7 @@ embassy-net = { version = "0.5", default-features = false, features = [
 # Hardware Abstraction Layer
 embedded-hal = { version = "1", default-features = false }
 embedded-hal-async = { version = "1", default-features = false }
-embedded-hal-bus = { version = "0.2", default-features = false, features = [
+embedded-hal-bus = { version = "0.3", default-features = false, features = [
     "async",
 ] }
 embedded-io-async = { version = "0.6", default-features = false }
