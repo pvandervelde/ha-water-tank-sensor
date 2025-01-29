@@ -40,7 +40,7 @@ embedded-io = { version = "0.6.1", default-features = false }
 log = { version = "0.4.22", default-features = false }
 
 # Embassy
-embassy-executor = { version = "0.6", default-features = false, features = [
+embassy-executor = { version = "0.7", default-features = false, features = [
     "task-arena-size-81920",
 ] }
 embassy-sync = { version = "0.6", default-features = false }
