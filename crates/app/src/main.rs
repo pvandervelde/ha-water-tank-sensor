@@ -71,6 +71,8 @@ mod http;
 mod logging;
 use self::logging::setup as setup_logging;
 
+mod meta;
+
 mod random;
 use self::random::RngWrapper;
 
