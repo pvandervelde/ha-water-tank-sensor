@@ -1,0 +1,61 @@
+api:
+ dashboard: true
+
+entryPoints:
+  http:
+    address: ":10080"
+    http:
+      redirections:
+        entryPoint:
+          to: https
+          scheme: https
+          permanent: true
+
+  https:
+    address: ":10443"
+    http:
+      tls: {}
+
+  traefik_metrics:
+    address: ":8081"
+
+providers:
+  docker:
+    defaultRule: "Host(`{{ index .Labels \"com.docker.compose.service\"}}.example.com`)" # Set a default that is clearly wrong for everything to indicate that a configuration is missing.
+    endpoint: "tcp://traefik-dockerproxy:2375"
+    exposedByDefault: false
+    watch: true
+
+  file:
+    directory: "/configs"
+    watch: true
+
+# certificatesResolvers:
+#   http:
+#     acme:
+#       email: cert@example.com
+#       storage: acme.json
+#       httpChallenge:
+#         entryPoint: http
+
+accessLog:
+  filePath: "/logs/access.log"
+  fields:
+    headers:
+      names:
+        User-Agent: keep
+
+log:
+  level: DEBUG
+
+metrics:
+  prometheus:
+    buckets:
+      - 0.1
+      - 0.3
+      - 1.2
+      - 5.0
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true
+    entryPoint: traefik_metrics

@@ -1,0 +1,137 @@
+// This file serves as an example Alloy configuration to interact with the
+// Docker Compose environment.
+//
+// This configuration works whether you are running Alloy locally or within the
+// Docker Compose environment when the `alloy` profile is enabled.
+
+//
+// SERVICE
+//
+
+prometheus.scrape "tank_service" {
+	targets = [{
+		__address__ = "env-monitor:8080",
+	}]
+	forward_to   = [prometheus.relabel.hostname.receiver]
+	job_name     = "tank_service"
+	metrics_path = "/metrics"
+}
+
+//
+// TRAEFIK
+//
+
+prometheus.scrape "traefik_ingress" {
+	targets = [{
+		__address__ = "ingress-proxy:8081",
+	}]
+	forward_to   = [prometheus.relabel.hostname.receiver]
+	job_name     = "traefik"
+	metrics_path = "/metrics"
+}
+
+//
+// SELF MONITORING
+//
+
+// Metrics
+
+prometheus.exporter.self "alloy_local" {
+}
+
+prometheus.scrape "alloy_local" {
+  targets    = prometheus.exporter.self.alloy_local.targets
+  forward_to = [prometheus.relabel.hostname.receiver,]
+  job_name   = "alloy"
+}
+
+// Logs
+
+logging {
+	level = "info"
+	format = "json"
+
+	// Forward internal logs to the grafanacloud Loki instance.
+	write_to = [loki.relabel.hostname.receiver]
+}
+
+// Traces
+
+tracing {
+  sampling_fraction = 0.1
+  write_to          = [otelcol.exporter.otlphttp.grafanacloud.input]
+}
+
+//
+// SHARED
+//
+
+loki.relabel "hostname"{
+	// rule {
+	// 	target_label = "instance"
+	// 	replacement = constants.hostname
+	// }
+
+	forward_to = [loki.write.grafanacloud.receiver]
+}
+
+prometheus.relabel "hostname" {
+	// rule {
+	// 	target_label = "instance"
+	// 	replacement  = constants.hostname
+	// }
+
+	forward_to   = [prometheus.remote_write.grafanacloud.receiver]
+}
+
+
+//
+// ENDPOINTS
+//
+
+prometheus.remote_write "grafanacloud" {
+	endpoint {
+		url = "https://prometheus-prod-41-prod-au-southeast-1.grafana.net/api/prom/push"
+
+		basic_auth {
+			username = env("GRAFANA_CLOUD_USER")
+			password = env("GRAFANA_CLOUD_API_KEY")
+		}
+	}
+}
+
+loki.write "grafanacloud" {
+	endpoint {
+		url = "https://logs-prod-026.grafana.net/loki/api/v1/push"
+
+		basic_auth {
+			username = env("GRAFANA_CLOUD_USER")
+			password = env("GRAFANA_CLOUD_API_KEY")
+		}
+	}
+}
+
+otelcol.receiver.otlp "otlp_receiver" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    traces = [otelcol.exporter.otlp.grafanacloud.input,]
+  }
+}
+
+otelcol.exporter.otlp "grafanacloud" {
+  client {
+    endpoint = "tempo-prod-16-prod-au-southeast-1.grafana.net:443"
+    auth = otelcol.auth.basic.grafanacloud.handler
+  }
+}
+
+otelcol.auth.basic "grafanacloud" {
+  username = "959643"
+  password = "<Your Grafana.com API Token>"
+}
