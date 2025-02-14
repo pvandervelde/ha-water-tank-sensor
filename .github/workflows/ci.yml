@@ -15,7 +15,7 @@ env:
 
 jobs:
   rust-build-app:
-    name: Rust build app
+    name: Build embedded app
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -29,4 +29,20 @@ jobs:
         uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2
       - name: Run command
         working-directory: "crates/app"
+        run: cargo build --release
+
+  rust-build-service:
+    name: Build service
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203 # v1
+        with:
+          toolchain: stable
+      - name: Enable caching
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2
+      - name: Run command
+        working-directory: "crates/service"
         run: cargo build --release
