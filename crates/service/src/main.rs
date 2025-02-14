@@ -1,12 +1,8 @@
-use std::sync::Arc;
-use std::time::Duration;
-
 // time
 use chrono::Utc;
 
 // REST
 use axum::{
-    extract::State,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -16,22 +12,21 @@ use axum::{
 use once_cell::sync::Lazy;
 
 // HTTP
-use reqwest::Client;
 use tower_http::trace::TraceLayer;
 
 // JSON
 use serde::{Deserialize, Serialize};
 
 // Observability
-use opentelemetry::trace::{TraceContextExt, TraceError, Tracer};
 use opentelemetry::KeyValue;
 use opentelemetry::{global, InstrumentationScope};
+use opentelemetry::{metrics::Meter, trace::TraceError};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::{LogError, LoggerProvider};
 use opentelemetry_sdk::metrics::{MetricError, PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::{runtime, trace as sdktrace, Resource};
-use tracing::{debug, error, info, instrument, warn, Level};
+use tracing::{debug, error, info, instrument};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
@@ -84,7 +79,7 @@ impl SensorData {
         }
 
         if self.pressure_in_pascal < 50.0e3 || self.pressure_in_pascal > 150.0e3 {
-            return Err("Pressure out of reasonable range (800-1200 hPa)".to_string());
+            return Err("Pressure out of reasonable range (500-1500 hPa)".to_string());
         }
 
         if self.battery_voltage < 0.0 || self.battery_voltage > 15.0 {
@@ -111,7 +106,7 @@ impl SensorData {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ApiResponse {
     status: String,
     timestamp: String,
@@ -165,7 +160,7 @@ async fn handle_sensor_data(
     let device_scope_attributes = vec![
         KeyValue::new(
             opentelemetry_semantic_conventions::resource::DEVICE_ID,
-            sensor_data.device_id,
+            sensor_data.device_id.clone(),
         ),
         KeyValue::new(
             opentelemetry_semantic_conventions::resource::DEVICE_MODEL_NAME,
@@ -173,7 +168,7 @@ async fn handle_sensor_data(
         ),
     ];
     let scope = InstrumentationScope::builder("tank_level_device")
-        .with_version(sensor_data.firmware_version)
+        .with_version(sensor_data.firmware_version.clone())
         .with_attributes(device_scope_attributes)
         .build();
 
@@ -185,62 +180,7 @@ async fn handle_sensor_data(
     );
 
     let meter = global::meter_with_scope(scope);
-
-    // Update boot count
-    let boot_count = meter
-        .u64_gauge("device_boot_count")
-        .with_description("The number of times the device has booted")
-        .build();
-    boot_count.record(sensor_data.boot_count as u64, &[]);
-
-    // Update the gauges
-    let temperature_gauge = meter
-        .f64_gauge("enclosure_temperature")
-        .with_description("Temperature of the device enclosure in degrees Celcius")
-        .with_unit("C")
-        .build();
-    temperature_gauge.record(sensor_data.temperature_in_celcius as f64, &[]);
-
-    let pressure_gauge = meter
-        .f64_gauge("enclosure_air_pressure")
-        .with_description("Air pressure in the device enclosure in Pascal")
-        .with_unit("Pa")
-        .build();
-    pressure_gauge.record(sensor_data.pressure_in_pascal as f64, &[]);
-
-    let humidity_gauge = meter
-        .f64_gauge("enclosure_humidity")
-        .with_description("Humidity (%) in the device enclosure as a percentage")
-        .build();
-    humidity_gauge.record(sensor_data.humidity_in_percent as f64, &[]);
-
-    let battery_voltage_gauge = meter
-        .f64_gauge("battery_voltage")
-        .with_description("The voltage of the device battery in Volts.")
-        .with_unit("V")
-        .build();
-    battery_voltage_gauge.record(sensor_data.battery_voltage as f64, &[]);
-
-    let pressure_sensor_voltage_gauge = meter
-        .f64_gauge("pressure_sensor_voltage")
-        .with_description("The voltage for the pressure sensor in Volts.")
-        .with_unit("V")
-        .build();
-    pressure_sensor_voltage_gauge.record(sensor_data.pressure_sensor_voltage as f64, &[]);
-
-    let tank_water_level_gauge = meter
-        .f64_gauge("water_level")
-        .with_description("The level of the water in the tank")
-        .with_unit("m")
-        .build();
-    tank_water_level_gauge.record(0.0, &[]);
-
-    let tank_water_temperature_gauge = meter
-        .f64_gauge("water_temperature")
-        .with_description("The temperature of the water in the tank")
-        .with_unit("C")
-        .build();
-    tank_water_temperature_gauge.record(sensor_data.tank_temperature_in_celcius as f64, &[]);
+    record_sensor_metrics(&meter, &sensor_data);
 
     Ok((
         StatusCode::OK,
@@ -303,22 +243,16 @@ async fn main() -> Result<()> {
 
     let config = ObservabilityConfig {
         metrics_push_url: std::env::var("METRICS_PUSH_URL")
-            .expect("METRICS_PUSH_URL environment variable must be set"),
+            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
         trace_push_url: std::env::var("TRACING_PUSH_URL")
-            .expect("TRACING_PUSH_URL environment variable must be set"),
+            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
         logs_push_url: std::env::var("LOGS_PUSH_URL")
-            .expect("LOGS_PUSH_URL environment variable must be set"),
+            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
     };
 
     // Initialize telemetry
-    let (logs, metrics, tracing) = setup_telemetry("sensor-service", &config)?;
+    let (logs, metrics, tracing) = setup_telemetry(&config)?;
     info!("Telemetry initialized");
-
-    // Initialize HTTP client
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .expect("Failed to create HTTP client");
 
     // Create router with routes
     let app = Router::new()
@@ -340,8 +274,89 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn record_gauge<T: Into<f64>>(
+    meter: &Meter,
+    name: String,
+    description: String,
+    unit: Option<String>,
+    value: T,
+) {
+    let builder = meter.f64_gauge(name).with_description(description);
+    let builder = match unit {
+        Some(u) => builder.with_unit(u),
+        None => builder,
+    };
+    let gauge = builder.build();
+    gauge.record(value.into(), &[]);
+}
+
+fn record_sensor_metrics(meter: &Meter, sensor_data: &SensorData) {
+    // Update boot count
+    let boot_count = meter
+        .u64_gauge("device_boot_count")
+        .with_description("The number of times the device has booted")
+        .build();
+    boot_count.record(sensor_data.boot_count as u64, &[]);
+
+    // Update the gauges
+    record_gauge(
+        meter,
+        "enclosure_temperature".to_string(),
+        "Temperature of the device enclosure in degrees Celcius".to_string(),
+        Some("C".to_string()),
+        sensor_data.temperature_in_celcius,
+    );
+
+    record_gauge(
+        meter,
+        "enclosure_air_pressure".to_string(),
+        "Air pressure in the device enclosure in Pascal".to_string(),
+        Some("Pa".to_string()),
+        sensor_data.pressure_in_pascal,
+    );
+
+    record_gauge(
+        meter,
+        "enclosure_humidity".to_string(),
+        "Humidity (%) in the device enclosure as a percentage".to_string(),
+        None,
+        sensor_data.humidity_in_percent,
+    );
+
+    record_gauge(
+        meter,
+        "battery_voltage".to_string(),
+        "The voltage of the device battery in Volts.".to_string(),
+        Some("V".to_string()),
+        sensor_data.battery_voltage,
+    );
+
+    record_gauge(
+        meter,
+        "pressure_sensor_voltage".to_string(),
+        "The voltage for the pressure sensor in Volts.".to_string(),
+        Some("V".to_string()),
+        sensor_data.pressure_sensor_voltage,
+    );
+
+    record_gauge(
+        meter,
+        "water_level".to_string(),
+        "The level of the water in the tank".to_string(),
+        Some("m".to_string()),
+        sensor_data.tank_level_in_meters,
+    );
+
+    record_gauge(
+        meter,
+        "water_temperature".to_string(),
+        "The temperature of the water in the tank".to_string(),
+        Some("C".to_string()),
+        sensor_data.tank_temperature_in_celcius,
+    );
+}
+
 fn setup_telemetry(
-    service_name: &str,
     config: &ObservabilityConfig,
 ) -> Result<(LoggerProvider, SdkMeterProvider, sdktrace::TracerProvider)> {
     let logger_provider = init_logs(config)?;
