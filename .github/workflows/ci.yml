@@ -15,7 +15,7 @@ env:
 
 jobs:
   rust-build-app:
-    name: Rust build app
+    name: Build embedded app
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -30,3 +30,29 @@ jobs:
       - name: Run command
         working-directory: "crates/app"
         run: cargo build --release
+
+  rust-build-service:
+    name: Build service
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@a54c7afa936fefeb4456b2dd8068152669aa8203 # v1
+        with:
+          toolchain: stable
+      - name: Enable caching
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@d2347103f7c028229cc9c9c440e90b572dd50592 # v2
+        with:
+          tool: cargo-llvm-cov@0.6.10
+      - name: Generate code coverage
+        working-directory: "crates/service"
+        run: cargo llvm-cov --all-features --workspace --codecov --output-path codecov.json
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }} # not required for public repos
+          files: codecov.json
+          fail_ci_if_error: true

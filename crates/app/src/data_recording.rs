@@ -22,10 +22,12 @@ use reqwless::{
 
 use thiserror::Error;
 
+use uom::si::angle::degree;
 use uom::si::pressure::pascal;
 use uom::si::{pressure::hectopascal, ratio::percent, thermodynamic_temperature::degree_celsius};
 
 use crate::device_meta::DEVICE_LOCATION;
+use crate::meta::CARGO_PKG_VERSION;
 use crate::random::RngWrapper;
 use crate::sensor_data::{EnvironmentalData, Reading};
 
@@ -55,25 +57,26 @@ fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<512> {
     // battery_voltage: f32,
     // pressure_sensor_voltage: f32,
     // liquid_height: f32,
+    // liquid_temperature: f32
 
     // The influx timestamp should be in nano seconds
-    let unix_timestamp = timestamp.to_unix_milliseconds() * 1e6;
+    let unix_timestamp = timestamp.to_unix_milliseconds() * 1e-6;
     let mut buffer: String<512> = String::new();
 
     writeln!(
         buffer,
-        "iot_stats,location={} boot_count={} {}",
-        DEVICE_LOCATION, boot_count, unix_timestamp
-    )
-    .unwrap();
-    writeln!(
-        buffer,
-        "environment,location={} temperature={} humidity={} pressure={} {}",
-        DEVICE_LOCATION,
-        temperature.get::<degree_celsius>(),
-        humidity.get::<percent>(),
-        air_pressure.get::<pascal>(),
-        unix_timestamp
+        "{{\"device_id\":\"{device_id}\",\"firmware_version\":\"{firmware_version}\",\"boot_count\":{boot_count},\"unix_time_in_seconds\":{unix_timestamp},\"temperature_in_celcius\":{temperature},\"humidity_in_percent\":{humidity},\"pressure_in_pascal\":{pressure},\"battery_voltage\":{battery_voltage},\"pressure_sensor_voltage\":{pressure_sensor_voltage},\"tank_level_in_meters\":{tank_level},\"tank_temperature_in_celcius\":{tank_temperature}}}",
+        device_id=DEVICE_LOCATION,
+        firmware_version=CARGO_PKG_VERSION.unwrap_or("NOT FOUND"),
+        boot_count=boot_count,
+        unix_timestamp=unix_timestamp,
+        temperature=temperature.get::<degree_celsius>(),
+        humidity=humidity.get::<percent>(),
+        pressure=air_pressure.get::<pascal>(),
+        battery_voltage=0.0,
+        pressure_sensor_voltage=0.0,
+        tank_level=0.0,
+        tank_temperature=temperature.get::<degree_celsius>(),
     )
     .unwrap();
 

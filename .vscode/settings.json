@@ -3,6 +3,6 @@
     //"rust-analyzer.cargo.target": "riscv32imac-unknown-none-elf",
     "rust-analyzer.linkedProjects": [
         "crates/app/Cargo.toml",
-        //"crates/service/Cargo.toml",
+        "crates/service/Cargo.toml",
     ]
 }
