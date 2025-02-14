@@ -7,7 +7,7 @@ edition = "2021"
 homepage = "https://github.com/pvandervelde/ha-water-tank-sensor"
 keywords = ["service"]
 license = "Apache-2.0"
-name = "tank-sensor-level-service"
+name = "tsl_service"
 readme = "README.md"
 repository = "https://github.com/pvandervelde/ha-water-tank-sensor"
 version = "0.1.0"
@@ -25,7 +25,7 @@ opentelemetry-appender-tracing = "0.27.0"
 opentelemetry-otlp = "0.27.0"
 opentelemetry-semantic-conventions = "0.27.0"
 opentelemetry_sdk = { version = "0.27.1", features = ["tokio"] }
-reqwest = "0.12.12"
+reqwest = { version = "0.12.12", default-features = false, features = ["charset", "h2", "http2", "rustls-tls"] }
 rustls = "0.23.22"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_influxlp = "0.1.4"

@@ -31,7 +31,7 @@ use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportCo
 use opentelemetry_sdk::logs::{LogError, LoggerProvider};
 use opentelemetry_sdk::metrics::{MetricError, PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::{runtime, trace as sdktrace, Resource};
-use tracing::{error, info, instrument, warn, Level};
+use tracing::{debug, error, info, instrument, warn, Level};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
@@ -83,7 +83,7 @@ impl SensorData {
             return Err("Humidity must be between 0% and 100%".to_string());
         }
 
-        if self.pressure_in_pascal < 800.0e3 || self.pressure_in_pascal > 1200.0e3 {
+        if self.pressure_in_pascal < 50.0e3 || self.pressure_in_pascal > 150.0e3 {
             return Err("Pressure out of reasonable range (800-1200 hPa)".to_string());
         }
 
@@ -143,6 +143,7 @@ struct ObservabilityConfig {
     logs_push_url: String,
 }
 
+#[instrument(fields())]
 async fn health_check() -> impl IntoResponse {
     info!("Health check request received");
     (
@@ -252,6 +253,7 @@ async fn handle_sensor_data(
 fn init_logs(
     config: &ObservabilityConfig,
 ) -> Result<opentelemetry_sdk::logs::LoggerProvider, LogError> {
+    debug!("Sending logs to: {}", config.logs_push_url.clone());
     let exporter = LogExporter::builder()
         .with_tonic()
         .with_endpoint(config.logs_push_url.clone())
@@ -266,6 +268,7 @@ fn init_logs(
 fn init_metrics(
     config: &ObservabilityConfig,
 ) -> Result<opentelemetry_sdk::metrics::SdkMeterProvider, MetricError> {
+    debug!("Sending metrics to: {}", config.metrics_push_url.clone());
     let exporter = MetricExporter::builder()
         .with_tonic()
         .with_endpoint(config.metrics_push_url.clone())
@@ -280,6 +283,7 @@ fn init_metrics(
 }
 
 fn init_traces(config: &ObservabilityConfig) -> Result<sdktrace::TracerProvider, TraceError> {
+    debug!("Sending traces to: {}", config.trace_push_url.clone());
     let exporter = SpanExporter::builder()
         .with_tonic()
         .with_endpoint(config.trace_push_url.clone())
