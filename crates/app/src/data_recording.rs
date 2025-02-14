@@ -74,7 +74,7 @@ fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<512> {
         humidity=humidity.get::<percent>(),
         pressure=air_pressure.get::<pascal>(),
         battery_voltage=0.0,
-        pressure_sensor_voltage=0.0
+        pressure_sensor_voltage=0.0,
         tank_level=0.0,
         tank_temperature=temperature.get::<degree_celsius>(),
     )
