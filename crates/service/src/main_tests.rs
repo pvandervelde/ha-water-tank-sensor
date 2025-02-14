@@ -1,12 +1,7 @@
 use super::*;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::routing::IntoMakeService;
+use axum::http::StatusCode;
 use opentelemetry::metrics::MeterProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use std::str::FromStr;
-use tower::service_fn;
-use tower::ServiceExt;
 
 // SensorData
 
