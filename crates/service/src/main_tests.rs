@@ -125,7 +125,7 @@ fn test_invalid_pressure() {
     let result = data.validate();
     assert_eq!(
         result.unwrap_err(),
-        "Pressure out of reasonable range (800-1200 hPa)".to_string()
+        "Pressure out of reasonable range (500-1500 hPa)".to_string()
     );
 }
 
