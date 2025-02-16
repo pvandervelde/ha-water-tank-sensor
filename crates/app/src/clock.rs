@@ -12,6 +12,7 @@ use esp_hal::macros::ram;
 
 use hifitime::prelude::*;
 
+use log::debug;
 use log::error;
 use log::info;
 
@@ -136,9 +137,13 @@ pub struct Clock {
 
 impl Clock {
     /// Create a new clock
-    fn new(unix_time_in_seconds: u64) -> Self {
-        let epoch = Epoch::from_unix_seconds(unix_time_in_seconds as f64);
+    fn new_from_utc_seconds(utc_time_in_seconds: u64) -> Self {
+        let epoch = Epoch::from_utc_seconds(utc_time_in_seconds as f64);
 
+        Self { epoch }
+    }
+
+    fn new_from_epoch(epoch: Epoch) -> Self {
         Self { epoch }
     }
 
@@ -183,7 +188,8 @@ impl Clock {
         match result {
             Ok(time) => {
                 info!("Time: {:?}", time);
-                Ok(Clock::new(time.seconds as u64))
+                let epoch = Epoch::from_unix_seconds(time.seconds as f64);
+                Ok(Clock::new_from_epoch(epoch))
             }
             Err(e) => {
                 error!("Error getting time: {:?}", e);
@@ -197,10 +203,11 @@ impl Clock {
         // SAFETY:
         // There is only one thread
         let now = unsafe { BOOT_TIME };
+        debug!("Loading time from RTC memory. Retrieved time of: {}", now);
         if now == 0 {
             None
         } else {
-            Some(Self::new(now))
+            Some(Self::new_from_utc_seconds(now))
         }
     }
 
@@ -226,7 +233,7 @@ impl Clock {
         duration_to_next_rounded_wakeup(epoch, period)
     }
 
-    /// Return current time as a Unix epoch
+    /// Return current time as a UTC epoch
     pub fn now_as_epoch(&self) -> Epoch {
         let micro_seconds_since_boot = Instant::now().as_micros();
         self.epoch + hifitime::Duration::from_microseconds(micro_seconds_since_boot as f64)
