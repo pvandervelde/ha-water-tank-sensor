@@ -50,6 +50,7 @@ struct SensorData {
     firmware_version: String,
     boot_count: u32,
     unix_time_in_seconds: f64,
+    run_time_in_seconds: f64,
     temperature_in_celcius: f32,
     humidity_in_percent: f32,
     pressure_in_pascal: f32,
@@ -65,9 +66,13 @@ impl SensorData {
             return Err("The device boot count should at least be 1.".to_string());
         }
 
-        // Jan 1st 2025 at midnight
-        if self.unix_time_in_seconds < 1735642800.0 {
+        // Between Jan 1st 2025 at midnight and Jan 1st 2030 at midnight
+        if self.unix_time_in_seconds < 1735642800.0 || self.unix_time_in_seconds > 1893409200.0 {
             return Err("Invalid timestamp".to_string());
+        }
+
+        if self.run_time_in_seconds < 0.0 {
+            return Err("Run time out of reasonable range (> 0.0)".to_string());
         }
 
         if self.temperature_in_celcius < -50.0 || self.temperature_in_celcius > 100.0 {
@@ -171,13 +176,6 @@ async fn handle_sensor_data(
         .with_version(sensor_data.firmware_version.clone())
         .with_attributes(device_scope_attributes)
         .build();
-
-    info!(
-        temperature = sensor_data.temperature_in_celcius,
-        humidity = sensor_data.humidity_in_percent,
-        pressure = sensor_data.pressure_in_pascal,
-        "Received sensor data"
-    );
 
     let meter = global::meter_with_scope(scope);
     record_sensor_metrics(&meter, &sensor_data);
@@ -299,6 +297,14 @@ fn record_sensor_metrics(meter: &Meter, sensor_data: &SensorData) {
     boot_count.record(sensor_data.boot_count as u64, &[]);
 
     // Update the gauges
+    record_gauge(
+        meter,
+        "run_time".to_string(),
+        "The amount of time, in seconds, that the device has been running".to_string(),
+        Some("sec".to_string()),
+        sensor_data.run_time_in_seconds,
+    );
+
     record_gauge(
         meter,
         "enclosure_temperature".to_string(),

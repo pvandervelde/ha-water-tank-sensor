@@ -6,6 +6,8 @@ use embassy_net::{dns::DnsSocket, tcp::client::TcpClient};
 use embassy_sync::channel::Sender;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Receiver};
 
+use esp_hal::peripherals::TIMG1;
+use esp_hal::time::{now, Instant};
 use heapless::String;
 
 use hifitime::Epoch;
@@ -46,7 +48,11 @@ pub enum Error {
 }
 
 // Use the influx line protocol from here: https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/
-fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<512> {
+fn format_metrics(
+    boot_count: u32,
+    environmental_data: Reading,
+    run_time_in_micro_seconds: u64,
+) -> String<512> {
     let timestamp = environmental_data.0;
     let environmental_sample = environmental_data.1;
 
@@ -60,16 +66,17 @@ fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<512> {
     // liquid_temperature: f32
 
     // The influx timestamp should be in nano seconds
-    let unix_timestamp = timestamp.to_unix_milliseconds() * 1e-6;
+    let unix_timestamp = timestamp.to_unix_milliseconds() * 1e-3;
     let mut buffer: String<512> = String::new();
 
     writeln!(
         buffer,
-        "{{\"device_id\":\"{device_id}\",\"firmware_version\":\"{firmware_version}\",\"boot_count\":{boot_count},\"unix_time_in_seconds\":{unix_timestamp},\"temperature_in_celcius\":{temperature},\"humidity_in_percent\":{humidity},\"pressure_in_pascal\":{pressure},\"battery_voltage\":{battery_voltage},\"pressure_sensor_voltage\":{pressure_sensor_voltage},\"tank_level_in_meters\":{tank_level},\"tank_temperature_in_celcius\":{tank_temperature}}}",
+        "{{\"device_id\":\"{device_id}\",\"firmware_version\":\"{firmware_version}\",\"boot_count\":{boot_count},\"unix_time_in_seconds\":{unix_timestamp},\"run_time_in_seconds\":{run_time:.3},\"temperature_in_celcius\":{temperature:.2},\"humidity_in_percent\":{humidity:.2},\"pressure_in_pascal\":{pressure:.1},\"battery_voltage\":{battery_voltage:.3},\"pressure_sensor_voltage\":{pressure_sensor_voltage:.3},\"tank_level_in_meters\":{tank_level:.3},\"tank_temperature_in_celcius\":{tank_temperature:.2}}}",
         device_id=DEVICE_LOCATION,
         firmware_version=CARGO_PKG_VERSION.unwrap_or("NOT FOUND"),
         boot_count=boot_count,
         unix_timestamp=unix_timestamp,
+        run_time=(run_time_in_micro_seconds as f64) * 1e-6,
         temperature=temperature.get::<degree_celsius>(),
         humidity=humidity.get::<percent>(),
         pressure=air_pressure.get::<pascal>(),
@@ -106,15 +113,16 @@ async fn receive_environmental_data(
     Ok(reading)
 }
 
-async fn send_data_to_grafana<'a>(
+async fn send_metrics<'a>(
     stack: Stack<'a>,
     rng_wrapper: &mut RngWrapper,
     boot_count: u32,
     environmental_data: Reading,
+    run_time_in_micro_seconds: u64,
 ) -> Result<(), Error> {
     info!("Sending metrics ...");
 
-    let metrics = format_metrics(boot_count, environmental_data);
+    let metrics = format_metrics(boot_count, environmental_data, run_time_in_micro_seconds);
     let bytes = metrics.as_bytes();
 
     let dns_socket = DnsSocket::new(stack);
@@ -174,6 +182,7 @@ pub async fn update_task(
     //ad_data_receiver: Receiver<'static, NoopRawMutex, Reading, 3>,
     data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
     boot_count: u32,
+    system_start_time: Instant,
 ) {
     // Get data from environment sensor
     let reading = match receive_environmental_data(&environmental_data_receiver).await {
@@ -184,9 +193,24 @@ pub async fn update_task(
         }
     };
 
+    // Get duration for operations
+    let current_time = now();
+    let run_time_in_micro_seconds = current_time
+        .checked_duration_since(system_start_time)
+        .unwrap()
+        .to_micros();
+
     // Get data from AD converter
-    if let Err(error) = send_data_to_grafana(stack, &mut rng_wrapper, boot_count, reading).await {
-        error!("Could not send data to Grafana: {error:?}");
+    if let Err(error) = send_metrics(
+        stack,
+        &mut rng_wrapper,
+        boot_count,
+        reading,
+        run_time_in_micro_seconds,
+    )
+    .await
+    {
+        error!("Could not send metrics: {error:?}");
     }
 
     data_sent_sender.send(true).await;

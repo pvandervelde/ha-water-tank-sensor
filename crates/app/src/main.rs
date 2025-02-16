@@ -6,6 +6,9 @@
 use core::convert::Infallible;
 
 use embassy_net::Stack;
+use esp_hal::peripherals::TIMG1;
+use esp_hal::time::now;
+use esp_hal::time::Instant;
 use esp_wifi::wifi::WifiController;
 use log::error;
 use log::info;
@@ -217,6 +220,8 @@ async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
 
     heap_allocator!(HEAP_MEMORY_SIZE);
 
+    let start_time = now();
+
     // Start the wifi
     {
         let systimer = SystemTimer::new(peripherals.SYSTIMER).split::<Target>();
@@ -252,6 +257,7 @@ async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
             rng_wrapper,
             data_sent_sender,
             boot_count,
+            start_time,
         )?;
 
         // Number of samples
@@ -325,6 +331,7 @@ fn setup_data_transmitting_task(
     rng_wrapper: RngWrapper,
     data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
     boot_count: u32,
+    system_start_time: Instant,
 ) -> Result<Sender<'static, NoopRawMutex, Reading, 3>, Error> {
     info!("Create channel");
     let channel: &'static mut _ = ENVIRONMENTAL_CHANNEL.init(Channel::new());
@@ -338,6 +345,7 @@ fn setup_data_transmitting_task(
         receiver,
         data_sent_sender,
         boot_count,
+        system_start_time,
     ));
 
     Ok(sender)
