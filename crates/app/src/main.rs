@@ -275,14 +275,19 @@ async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
             environmental_data_sender,
         );
 
+        // Turn on the pressure sensor
+        enable_pressure_sensor();
+
         // Wait for the pressure sensor to be stable
 
         // Wait at least x milliseconds
         // Then check the voltage on the pressure sensor
 
         // Take pressure sensor readings
+        read_pressure_sensor().await;
 
         // Turn off power to the pressure sensor when we're done taking the recordings
+        disable_pressure_sensor();
 
         info!("Waiting for sensors to complete tasks");
         let was_processed = data_sent_receiver.receive().await;
