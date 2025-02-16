@@ -31,9 +31,9 @@ use crate::meta::CARGO_PKG_VERSION;
 use crate::random::RngWrapper;
 use crate::sensor_data::{EnvironmentalData, Reading};
 
-const GRAFANA_CLOUD_URL: &str = env!("GRAFANA_METRICS_URL");
-const GRAFANA_USER_NAME: &str = env!("GRAFANA_USER_NAME");
-const GRAFANA_API_KEY: &str = env!("GRAFANA_METRICS_API_KEY");
+const METRICS_URL: &str = env!("METRICS_URL");
+//const GRAFANA_USER_NAME: &str = env!("GRAFANA_USER_NAME");
+//const GRAFANA_API_KEY: &str = env!("GRAFANA_METRICS_API_KEY");
 
 /// A clock error
 #[derive(Error, Debug)]
@@ -112,7 +112,7 @@ async fn send_data_to_grafana<'a>(
     boot_count: u32,
     environmental_data: Reading,
 ) -> Result<(), Error> {
-    info!("Sending data to grafana ...");
+    info!("Sending metrics ...");
 
     let metrics = format_metrics(boot_count, environmental_data);
     let bytes = metrics.as_bytes();
@@ -122,27 +122,27 @@ async fn send_data_to_grafana<'a>(
     let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
     let tcp_client = TcpClient::new(stack, &tcp_client_state);
 
-    let seed = rng_wrapper.next_u64();
-    let mut read_record_buffer = [0_u8; 16640];
-    let mut write_record_buffer = [0_u8; 16640];
+    // let seed = rng_wrapper.next_u64();
+    // let mut read_record_buffer = [0_u8; 16640];
+    // let mut write_record_buffer = [0_u8; 16640];
 
-    let tls_config = TlsConfig::new(
-        seed,
-        &mut read_record_buffer,
-        &mut write_record_buffer,
-        TlsVerify::None,
-    );
+    // let tls_config = TlsConfig::new(
+    //     seed,
+    //     &mut read_record_buffer,
+    //     &mut write_record_buffer,
+    //     TlsVerify::None,
+    // );
 
     debug!("Creating HTTP client ...");
-    let mut client = HttpClient::new_with_tls(&tcp_client, &dns_socket, tls_config);
+    let mut client = HttpClient::new(&tcp_client, &dns_socket);
 
     debug!("Creating request ...");
     let mut rx_buf = [0; 4096];
-    let mut resource = client.resource(GRAFANA_CLOUD_URL).await.unwrap();
+    let mut resource = client.resource(METRICS_URL).await.unwrap();
     let response = resource
-        .post("push/influx/write")
-        .content_type(ContentType::TextPlain)
-        .basic_auth(GRAFANA_USER_NAME, GRAFANA_API_KEY)
+        .post("/api/v1/sensor")
+        .content_type(ContentType::ApplicationJson)
+        //.basic_auth(GRAFANA_USER_NAME, GRAFANA_API_KEY)
         .body(bytes);
 
     debug!("Sending request ...");
@@ -152,15 +152,15 @@ async fn send_data_to_grafana<'a>(
     match response {
         Ok(r) => {
             if r.status.is_successful() {
-                debug!("Send data to grafana. Status code: {:?}", r.status);
+                debug!("Sent metrics. Status code: {:?}", r.status);
                 Ok(())
             } else {
-                error!("Failed to send data to grafana: Status code {:?}", r.status,);
+                error!("Failed to send metrics: Status code {:?}", r.status,);
                 Err(Error::NonSuccessResponseCode)
             }
         }
         Err(e) => {
-            error!("Failed to send data to grafana: error {:?}", e);
+            error!("Failed to send metrics: error {:?}", e);
             Err(Error::RequestFailed)
         }
     }
