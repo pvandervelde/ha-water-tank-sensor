@@ -100,6 +100,7 @@ anyhow = { version = "1.0.95", default-features = false }
 thiserror = { version = "2.0.9", default-features = false }
 
 # Sensor
+ads1x1x = "0.3.0"
 bme280-rs = { version = "0.3", default-features = false, features = [
     "async",
     "uom",
@@ -116,3 +117,5 @@ sntpc = { version = "0.5.2", default-features = false, features = [
 # Random
 rand_core = { version = "0.6", default-features = false }
 hifitime = { version = "4.0.2", default-features = false }
+float-cmp = "0.10.0"
+libm = "0.2.11"

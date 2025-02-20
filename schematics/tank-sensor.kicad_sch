@@ -6368,6 +6368,16 @@
 		)
 		(uuid "8ba5eef9-5f1d-43ad-b79f-6eed08944ec4")
 	)
+	(text "All ADS1115 signals should be between 0 and 2.0V"
+		(exclude_from_sim no)
+		(at 96.012 103.124 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "8f522f4a-11f2-49e8-84cf-22e394dfaf53")
+	)
 	(text "Battery voltage sensing \nfor 12V battery"
 		(exclude_from_sim no)
 		(at 67.31 69.088 0)
@@ -6378,6 +6388,16 @@
 			(justify left bottom)
 		)
 		(uuid "a192866b-41d8-43c2-b7c2-406f3e2ecdb2")
+	)
+	(text "For a 5m pressure sensor in a tank that never goes over:\n* 3.0m -> 13.6mA -> use a 130 Ohm resistor -> Voltage range between 0.52 and 1.768 (1.25V)\n* 2.6m -> 12.36mA -> use a 150 Ohm resistor -> Voltage range between 0.6 and 1.854 (1.25V)"
+		(exclude_from_sim no)
+		(at 217.424 105.918 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "f057716d-b5bf-4b54-a2d0-c35c73c94bda")
 	)
 	(text "Close this jumper for offline operation.\nThis suppresses LoRaWAN connectivity."
 		(exclude_from_sim no)
@@ -7627,7 +7647,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "4.7K"
+		(property "Value" "1K"
 			(at 205.74 85.0899 0)
 			(effects
 				(font
@@ -8248,7 +8268,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "4.7K"
+		(property "Value" "2K"
 			(at 94.488 69.723 0)
 			(effects
 				(font
@@ -8679,7 +8699,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "15K"
+		(property "Value" "13K"
 			(at 94.488 49.403 0)
 			(effects
 				(font
@@ -10012,7 +10032,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "36K"
+		(property "Value" "13K"
 			(at 205.74 71.1199 0)
 			(effects
 				(font
@@ -10214,7 +10234,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "100"
+		(property "Value" "130"
 			(at 219.71 69.85 90)
 			(effects
 				(font

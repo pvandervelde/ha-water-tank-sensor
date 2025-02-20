@@ -6,7 +6,6 @@ use embassy_net::{dns::DnsSocket, tcp::client::TcpClient};
 use embassy_sync::channel::Sender;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Receiver};
 
-use esp_hal::peripherals::TIMG1;
 use esp_hal::time::{now, Instant};
 use heapless::String;
 
@@ -14,24 +13,19 @@ use hifitime::Epoch;
 use log::info;
 use log::{debug, error};
 
-use rand_core::RngCore as _;
-
-use reqwless::client::{HttpClient, TlsConfig, TlsVerify};
-use reqwless::{
-    headers::ContentType,
-    request::{Method, RequestBuilder},
-};
+use reqwless::client::HttpClient;
+use reqwless::{headers::ContentType, request::RequestBuilder};
 
 use thiserror::Error;
 
-use uom::si::angle::degree;
+use uom::si::electric_potential::volt;
+use uom::si::length::meter;
 use uom::si::pressure::pascal;
 use uom::si::{pressure::hectopascal, ratio::percent, thermodynamic_temperature::degree_celsius};
 
 use crate::device_meta::DEVICE_LOCATION;
 use crate::meta::CARGO_PKG_VERSION;
-use crate::random::RngWrapper;
-use crate::sensor_data::{EnvironmentalData, Reading};
+use crate::sensor_data::{Ads1115Data, Bme280Data};
 
 const METRICS_URL: &str = env!("METRICS_URL");
 //const GRAFANA_USER_NAME: &str = env!("GRAFANA_USER_NAME");
@@ -50,19 +44,18 @@ pub enum Error {
 // Use the influx line protocol from here: https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/
 fn format_metrics(
     boot_count: u32,
-    environmental_data: Reading,
+    timestamp: Epoch,
+    bme280_data: Bme280Data,
+    ads1115_data: Ads1115Data,
     run_time_in_micro_seconds: u64,
 ) -> String<512> {
-    let timestamp = environmental_data.0;
-    let environmental_sample = environmental_data.1;
+    let temperature = bme280_data.temperature;
+    let humidity = bme280_data.humidity;
+    let air_pressure = bme280_data.pressure;
 
-    let temperature = environmental_sample.temperature;
-    let humidity = environmental_sample.humidity;
-    let air_pressure = environmental_sample.pressure;
-
-    // battery_voltage: f32,
-    // pressure_sensor_voltage: f32,
-    // liquid_height: f32,
+    let battery_voltage = ads1115_data.battery_voltage;
+    let pressure_sensor_voltage = ads1115_data.pressure_sensor_voltage;
+    let liquid_height = ads1115_data.height_above_sensor;
     // liquid_temperature: f32
 
     // The influx timestamp should be in nano seconds
@@ -80,9 +73,9 @@ fn format_metrics(
         temperature=temperature.get::<degree_celsius>(),
         humidity=humidity.get::<percent>(),
         pressure=air_pressure.get::<pascal>(),
-        battery_voltage=0.0,
-        pressure_sensor_voltage=0.0,
-        tank_level=0.0,
+        battery_voltage=battery_voltage.get::<volt>(),
+        pressure_sensor_voltage=pressure_sensor_voltage.get::<volt>(),
+        tank_level=liquid_height.get::<meter>(),
         tank_temperature=temperature.get::<degree_celsius>(),
     )
     .unwrap();
@@ -90,8 +83,24 @@ fn format_metrics(
     buffer
 }
 
-/// Print a sample to log
-fn log_sample(time: &Epoch, sample: &EnvironmentalData) {
+fn log_ads1115_reading(time: &Epoch, sample: &Ads1115Data) {
+    let battery_voltage = sample.battery_voltage.get::<volt>();
+    let pressure_sensor_voltage = sample.pressure_sensor_voltage.get::<volt>();
+    let height_above_sensor = sample.height_above_sensor.get::<meter>();
+
+    info!("Received sample at {:?}", time);
+    info!(" ┣ Battery voltage:            {:.2} V", battery_voltage);
+    info!(
+        " ┣ Pressure sensor voltage:    {:.2} V",
+        pressure_sensor_voltage
+    );
+    info!(
+        " ┗ Liquid height above sensor: {:.2} m",
+        height_above_sensor
+    );
+}
+
+fn log_bme280_reading(time: &Epoch, sample: &Bme280Data) {
     let temperature = sample.temperature.get::<degree_celsius>();
     let humidity = sample.humidity.get::<percent>();
     let pressure = sample.pressure.get::<hectopascal>();
@@ -102,27 +111,35 @@ fn log_sample(time: &Epoch, sample: &EnvironmentalData) {
     info!(" ┗ Pressure:    {:.2} hPa", pressure);
 }
 
-async fn receive_environmental_data(
-    receiver: &Receiver<'static, NoopRawMutex, Reading, 3>,
-) -> Result<Reading, Error> {
-    info!("Wait for message from sensor");
+async fn receive_sensor_data(
+    receiver: &Receiver<'static, NoopRawMutex, (Epoch, Bme280Data, Ads1115Data), 3>,
+) -> Result<(Epoch, Bme280Data, Ads1115Data), Error> {
+    info!("Wait for data from the sensors ...");
 
     let reading = receiver.receive().await;
-    log_sample(&reading.0, &reading.1);
+    log_ads1115_reading(&reading.0, &reading.2);
+    log_bme280_reading(&reading.0, &reading.1);
 
     Ok(reading)
 }
 
 async fn send_metrics<'a>(
     stack: Stack<'a>,
-    rng_wrapper: &mut RngWrapper,
     boot_count: u32,
-    environmental_data: Reading,
+    timestamp: Epoch,
+    bme280_data: Bme280Data,
+    ads1115_data: Ads1115Data,
     run_time_in_micro_seconds: u64,
 ) -> Result<(), Error> {
     info!("Sending metrics ...");
 
-    let metrics = format_metrics(boot_count, environmental_data, run_time_in_micro_seconds);
+    let metrics = format_metrics(
+        boot_count,
+        timestamp,
+        bme280_data,
+        ads1115_data,
+        run_time_in_micro_seconds,
+    );
     let bytes = metrics.as_bytes();
 
     let dns_socket = DnsSocket::new(stack);
@@ -177,21 +194,20 @@ async fn send_metrics<'a>(
 #[embassy_executor::task]
 pub async fn update_task(
     stack: Stack<'static>,
-    mut rng_wrapper: RngWrapper,
-    environmental_data_receiver: Receiver<'static, NoopRawMutex, Reading, 3>,
-    //ad_data_receiver: Receiver<'static, NoopRawMutex, Reading, 3>,
+    sensor_data_receiver: Receiver<'static, NoopRawMutex, (Epoch, Bme280Data, Ads1115Data), 3>,
     data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
     boot_count: u32,
     system_start_time: Instant,
 ) {
-    // Get data from environment sensor
-    let reading = match receive_environmental_data(&environmental_data_receiver).await {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Failed to read the environmental data: {e:?}");
-            return;
-        }
-    };
+    // Get data from the sensors
+    let (epoch, bme280_reading, ads1115_reading) =
+        match receive_sensor_data(&sensor_data_receiver).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Failed to read the environmental data: {e:?}");
+                return;
+            }
+        };
 
     // Get duration for operations
     let current_time = now();
@@ -203,9 +219,10 @@ pub async fn update_task(
     // Get data from AD converter
     if let Err(error) = send_metrics(
         stack,
-        &mut rng_wrapper,
         boot_count,
-        reading,
+        epoch,
+        bme280_reading,
+        ads1115_reading,
         run_time_in_micro_seconds,
     )
     .await

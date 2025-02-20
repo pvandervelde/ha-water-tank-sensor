@@ -59,9 +59,6 @@ static STACK_RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
 /// Static cell for WiFi controller
 static WIFI_CONTROLLER: StaticCell<EspWifiController<'static>> = StaticCell::new();
 
-/// Signal to request to stop WiFi
-pub static STOP_WIFI_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-
 /// Error within WiFi connection
 #[derive(Debug, Error)]
 pub enum Error {
