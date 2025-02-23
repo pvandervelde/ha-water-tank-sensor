@@ -5,6 +5,7 @@
 
 use core::convert::Infallible;
 
+use clock::load_clock;
 use embassy_net::Stack;
 use esp_hal::time::now;
 use esp_hal::time::Instant;
@@ -169,20 +170,6 @@ async fn connect_to_wifi<'a>(
     });
 
     Ok((guard, stack))
-}
-
-/// Load clock from RTC memory of from server
-async fn load_clock<'a>(stack: Stack<'_>) -> Result<Clock, Error> {
-    let clock = if let Some(clock) = Clock::from_rtc_memory() {
-        info!("Clock loaded from RTC memory");
-        clock
-    } else {
-        info!("Synchronize clock from server");
-
-        Clock::from_server(stack).await?
-    };
-
-    Ok(clock)
 }
 
 /// Main task

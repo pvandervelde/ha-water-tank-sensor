@@ -28,6 +28,13 @@ use time::error::ComponentRange as TimeComponentRange;
 #[ram(rtc_fast)]
 static mut BOOT_TIME: u64 = 0;
 
+/// Stored time indicating when the last time was that the clock was synchronized to NTP
+///
+/// This is a statically allocated variable and it is placed in the RTC Fast
+/// memory, which survives deep sleep.
+#[ram(rtc_fast)]
+static mut LAST_CLOCK_UPDATE_TIME: u64 = 0;
+
 // NTP configuration
 const NTP_SERVER: &str = "pool.ntp.org";
 const NTP_PORT: u16 = 123;
@@ -189,7 +196,11 @@ impl Clock {
             Ok(time) => {
                 info!("Time: {:?}", time);
                 let epoch = Epoch::from_unix_seconds(time.seconds as f64);
-                Ok(Clock::new_from_epoch(epoch))
+                let clock = Clock::new_from_epoch(epoch);
+
+                save_last_update_time_to_rtc_memory(clock.now());
+
+                Ok(clock)
             }
             Err(e) => {
                 error!("Error getting time: {:?}", e);
@@ -223,16 +234,6 @@ impl Clock {
         }
     }
 
-    /// Compute the next wakeup rounded down to a period
-    ///
-    /// * At 09:46:12 with period 1 minute, next rounded wakeup is 09:47:00.
-    /// * At 09:46:12 with period 5 minutes, next rounded wakeup is 09:50:00.
-    /// * At 09:46:12 with period 1 hour, next rounded wakeup is 10:00:00.
-    pub fn duration_to_next_rounded_wakeup(&self, period: Duration) -> Duration {
-        let epoch = self.now_as_epoch();
-        duration_to_next_rounded_wakeup(epoch, period)
-    }
-
     /// Return current time as a UTC epoch
     pub fn now_as_epoch(&self) -> Epoch {
         let micro_seconds_since_boot = Instant::now().as_micros();
@@ -246,6 +247,52 @@ fn duration_to_next_rounded_wakeup(now: Epoch, period: Duration) -> Duration {
     then - now
 }
 
+/// Load clock from RTC memory of from server
+pub async fn load_clock<'a>(stack: Stack<'_>) -> Result<Clock, Error> {
+    let last_restore_time = load_last_update_time_from_rtc_memory();
+
+    let clock = if let Some(clock) = Clock::from_rtc_memory() {
+        if let Some(restore_time) = last_restore_time {
+            let recheck_time =
+                restore_time + Duration::from_seconds(NTP_SYNC_INTERVAL_IN_SECONDS as f64);
+            if clock.now() > recheck_time {
+                info!(
+                    "Last NTP synchronization longer than {} seconds. Synchronizing clock from NTP",
+                    NTP_SYNC_INTERVAL_IN_SECONDS
+                );
+                Clock::from_server(stack).await?
+            } else {
+                info!("Clock loaded from RTC memory");
+                clock
+            }
+        } else {
+            info!("Clock loaded from RTC memory");
+            clock
+        }
+    } else {
+        info!("Synchronize clock from server");
+
+        Clock::from_server(stack).await?
+    };
+
+    Ok(clock)
+}
+
+fn load_last_update_time_from_rtc_memory() -> Option<Epoch> {
+    // SAFETY:
+    // There is only one thread
+    let now = unsafe { LAST_CLOCK_UPDATE_TIME };
+    debug!(
+        "Loading last update time from RTC memory. Retrieved time of: {}",
+        now
+    );
+    if now == 0 {
+        None
+    } else {
+        Some(Epoch::from_utc_seconds(now as f64))
+    }
+}
+
 /// Compute the next wakeup rounded down to a period
 ///
 /// * At 09:46:12 with period 1 minute, next rounded wakeup is 09:47:00.
@@ -255,4 +302,12 @@ fn next_rounded_wakeup(now: Epoch, period: Duration) -> Epoch {
     let then = now + period;
     let time_in_seconds = (then.to_utc_seconds() as u64 / 60) * 60;
     Epoch::from_utc_seconds(time_in_seconds as f64)
+}
+
+fn save_last_update_time_to_rtc_memory(now: Epoch) {
+    // SAFETY:
+    // There is only one thread
+    unsafe {
+        LAST_CLOCK_UPDATE_TIME = now.to_utc_seconds() as u64;
+    }
 }
