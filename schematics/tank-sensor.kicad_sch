@@ -4039,139 +4039,6 @@
 				)
 			)
 		)
-		(symbol "Switch:SW_SPST"
-			(pin_names
-				(offset 0) hide)
-			(exclude_from_sim no)
-			(in_bom yes)
-			(on_board yes)
-			(property "Reference" "SW"
-				(at 0 3.175 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Value" "SW_SPST"
-				(at 0 -2.54 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-				)
-			)
-			(property "Footprint" ""
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Datasheet" "~"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "Description" "Single Pole Single Throw (SPST) switch"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(property "ki_keywords" "switch lever"
-				(at 0 0 0)
-				(effects
-					(font
-						(size 1.27 1.27)
-					)
-					(hide yes)
-				)
-			)
-			(symbol "SW_SPST_0_0"
-				(circle
-					(center -2.032 0)
-					(radius 0.508)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(polyline
-					(pts
-						(xy -1.524 0.254) (xy 1.524 1.778)
-					)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-				(circle
-					(center 2.032 0)
-					(radius 0.508)
-					(stroke
-						(width 0)
-						(type default)
-					)
-					(fill
-						(type none)
-					)
-				)
-			)
-			(symbol "SW_SPST_1_1"
-				(pin passive line
-					(at -5.08 0 0)
-					(length 2.54)
-					(name "A"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "1"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-				(pin passive line
-					(at 5.08 0 180)
-					(length 2.54)
-					(name "B"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number "2"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-				)
-			)
-		)
 		(symbol "Transistor_FET:BS170"
 			(pin_names hide)
 			(exclude_from_sim no)
@@ -5524,16 +5391,6 @@
 	)
 	(wire
 		(pts
-			(xy 137.16 149.86) (xy 171.45 149.86)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "80ba2ae5-b368-42c7-99f7-f303b2a0a315")
-	)
-	(wire
-		(pts
 			(xy 62.23 40.64) (xy 88.9 40.64)
 		)
 		(stroke
@@ -5881,16 +5738,6 @@
 			(type default)
 		)
 		(uuid "c01c72b8-4a91-47d0-a4fd-850146e8c9b3")
-	)
-	(wire
-		(pts
-			(xy 181.61 149.86) (xy 186.69 149.86)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "c0472824-46ef-4d9e-b3b5-4590f29f14a0")
 	)
 	(wire
 		(pts
@@ -6399,17 +6246,6 @@
 		)
 		(uuid "f057716d-b5bf-4b54-a2d0-c35c73c94bda")
 	)
-	(text "Close this jumper for offline operation.\nThis suppresses LoRaWAN connectivity."
-		(exclude_from_sim no)
-		(at 166.116 143.764 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "fa67fec0-5e4f-448c-9289-8922c491d1b0")
-	)
 	(global_label "PRESS_SENSE"
 		(shape input)
 		(at 262.89 125.73 0)
@@ -6907,28 +6743,6 @@
 		(uuid "9e5b3c3e-70ca-41fe-9223-d5f3acbe489f")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 154.5553 66.04 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-				(hide yes)
-			)
-		)
-	)
-	(global_label "OFFLINE_MODE"
-		(shape input)
-		(at 162.56 149.86 270)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify right)
-		)
-		(uuid "ac6395dc-9317-4259-80b5-5bde342350bb")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 162.56 166.6338 90)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -9420,73 +9234,6 @@
 		)
 	)
 	(symbol
-		(lib_id "Switch:SW_SPST")
-		(at 176.53 149.86 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "994f1c5b-0ae9-4639-ad59-4a43f2d5538c")
-		(property "Reference" "SW1"
-			(at 176.53 145.288 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "~"
-			(at 176.53 146.2024 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 176.53 149.86 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 176.53 149.86 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" ""
-			(at 176.53 149.86 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "12df875a-c856-4930-8529-d8be7d9e7e6b")
-		)
-		(pin "2"
-			(uuid "52662792-eeeb-4488-b3bc-ccf3756247ca")
-		)
-		(instances
-			(project "tank-sensor"
-				(path "/a113f251-aa94-483d-8b1b-4a797e2f25c2"
-					(reference "SW1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Connector_Generic:Conn_01x01")
 		(at 252.73 115.57 180)
 		(unit 1)
@@ -10346,71 +10093,6 @@
 			(project "tank-sensor"
 				(path "/a113f251-aa94-483d-8b1b-4a797e2f25c2"
 					(reference "#PWR09")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:GND")
-		(at 186.69 149.86 0)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(uuid "e29364b6-7d58-4dce-ab80-48d7e42477aa")
-		(property "Reference" "#PWR03"
-			(at 186.69 156.21 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Value" "GND"
-			(at 186.817 154.2542 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 186.69 149.86 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" ""
-			(at 186.69 149.86 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" ""
-			(at 186.69 149.86 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "1"
-			(uuid "94d1254a-1463-442f-81a4-e0ab5dba19e2")
-		)
-		(instances
-			(project "tank-sensor"
-				(path "/a113f251-aa94-483d-8b1b-4a797e2f25c2"
-					(reference "#PWR03")
 					(unit 1)
 				)
 			)
