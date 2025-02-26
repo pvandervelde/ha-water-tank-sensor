@@ -52,8 +52,8 @@ struct SensorData {
     device_id: String,
     firmware_version: String,
     boot_count: u32,
-    unix_time_in_seconds: f64,
     run_time_in_seconds: f64,
+    wifi_start_time_in_seconds: f64,
     temperature_in_celcius: f32,
     humidity_in_percent: f32,
     pressure_in_pascal: f32,
@@ -69,13 +69,12 @@ impl SensorData {
             return Err("The device boot count should at least be 1.".to_string());
         }
 
-        // Between Jan 1st 2025 at midnight and Jan 1st 2030 at midnight
-        if self.unix_time_in_seconds < 1735642800.0 || self.unix_time_in_seconds > 1893409200.0 {
-            return Err("Invalid timestamp".to_string());
-        }
-
         if self.run_time_in_seconds < 0.0 {
             return Err("Run time out of reasonable range (> 0.0)".to_string());
+        }
+
+        if self.wifi_start_time_in_seconds < 0.0 {
+            return Err("Wifi start time out of reasonable range (> 0.0)".to_string());
         }
 
         if self.temperature_in_celcius < -50.0 || self.temperature_in_celcius > 100.0 {
@@ -307,6 +306,14 @@ fn record_sensor_metrics(meter: &Meter, sensor_data: &SensorData) {
         "The amount of time, in seconds, that the device has been running".to_string(),
         Some("sec".to_string()),
         sensor_data.run_time_in_seconds,
+    );
+
+    record_gauge(
+        meter,
+        "wifi_start_time".to_string(),
+        "The amount of time, in seconds, that the wifi took to get started".to_string(),
+        Some("sec".to_string()),
+        sensor_data.wifi_start_time_in_seconds,
     );
 
     record_gauge(
