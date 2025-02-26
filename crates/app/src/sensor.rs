@@ -55,8 +55,9 @@ use uom::si::thermodynamic_temperature::degree_celsius;
 use thiserror::Error;
 
 use crate::board_components::{
-    PRESSURE_SENSOR_MAXIMUM_HEIGHT, PRESSURE_SENSOR_OUTPUT_RESISTOR_AFTER_PROBE,
-    VOLTAGE_DIVIDER_BATTERY_RESISTOR_AFTER_PROBE, VOLTAGE_DIVIDER_BATTERY_RESISTOR_BEFORE_PROBE,
+    MPU_OUTPUT_VOLTAGE, PRESSURE_SENSOR_MAXIMUM_HEIGHT,
+    PRESSURE_SENSOR_OUTPUT_RESISTOR_AFTER_PROBE, VOLTAGE_DIVIDER_BATTERY_RESISTOR_AFTER_PROBE,
+    VOLTAGE_DIVIDER_BATTERY_RESISTOR_BEFORE_PROBE,
     VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_AFTER_PROBE,
     VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_BEFORE_PROBE,
 };
@@ -102,6 +103,9 @@ enum SensorError {
 
     #[error("The voltage was too low.")]
     VoltageTooLow,
+
+    #[error("The pressure sensor voltage is not stable.")]
+    PressureSensorVoltageNotStable,
 }
 
 impl From<ClockError> for SensorError {
@@ -210,7 +214,7 @@ async fn read_ads1115(adc: &mut Adc<'_>) -> Result<Ads1115Data, SensorError> {
     match adc.set_full_scale_range(ads1x1x::FullScaleRange::Within2_048V) {
         Ok(_) => {
             // Everything is fine. Moving on
-            debug!("Set ADS1115 data rate to 16/s.");
+            debug!("Set ADS1115 scale range to 2V.");
         }
         Err(_) => {
             warn!("Failed to set ADS1115 scale range to 2V.");
@@ -219,96 +223,59 @@ async fn read_ads1115(adc: &mut Adc<'_>) -> Result<Ads1115Data, SensorError> {
     };
 
     // Loop around measuring A2 until it stabilizes
-    let mut stable_count = 0;
-    loop {
-        // Status of the pressure sensor voltage
-        let channel_a2_voltage =
-            calculate_ads1115_voltage(adc.read(channel::SingleA2).unwrap()).await;
-        let pressure_sensor_voltage = calculate_input_voltage_for_voltage_divider(
-            channel_a2_voltage,
-            VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_BEFORE_PROBE,
-            VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_AFTER_PROBE,
-        );
+    info!("Wait for voltage on ADS1115 A2 to stabilize ...");
+    let stabilization_result = wait_for_pressure_sensor_voltage_to_stabilize(adc).await;
+    match stabilization_result {
+        Ok(_) => info!("Pressure sensor voltage is stable."),
+        Err(_) => {
+            error!("Pressure sensor voltage is unstable.");
+            return Err(SensorError::PressureSensorVoltageNotStable);
+        }
+    }
 
-        let diff = fabsf(EXPECTED_PRESSURE_SENSOR_VOLTAGE - pressure_sensor_voltage);
-        if diff < 0.2 {
-            stable_count += 1;
-        } else {
-            stable_count = 0;
+    // Then collect data
+    info!("Collecting samples from the ADS1115 ...");
+    let mut collected_data = Vec::<Ads1115Data, NUMBER_OF_SAMPLES>::new();
+    for _n in 0..NUMBER_OF_SAMPLES {
+        let sample_result = sample_voltage_data(adc).await;
+        match sample_result {
+            Ok(r) => drop(collected_data.push(r)),
+            Err(error) => error!("Could not sample sensor: {error:?}"),
         }
 
-        if stable_count == 10 {
-            break;
-        }
-
-        let wait_interval = hifitime::Duration::from_seconds(
-            PRESSURE_SENSOR_VOLTAGE_STABILIZATION_CHECK_INTERVAL_IN_SECONDS,
-        );
+        let wait_interval = hifitime::Duration::from_seconds(TIME_BETWEEN_SAMPLES_IN_SECONDS);
+        info!("Wait {}s for next sample", wait_interval.to_seconds());
         Timer::after(embassy_time::Duration::from_secs(
             wait_interval.to_seconds() as u64,
         ))
         .await;
     }
 
-    // Then collect data
-    let mut collected_data = Vec::<Ads1115Data, NUMBER_OF_SAMPLES>::new();
-    for n in 0..NUMBER_OF_SAMPLES {
-        // Status of the LDR
-        let ldr_voltage = calculate_ads1115_voltage(adc.read(channel::SingleA0).unwrap());
-
-        // Status of the battery
-        let channel_a3_voltage =
-            calculate_ads1115_voltage(adc.read(channel::SingleA3).unwrap()).await;
-        let battery_voltage = calculate_input_voltage_for_voltage_divider(
-            channel_a3_voltage,
-            VOLTAGE_DIVIDER_BATTERY_RESISTOR_BEFORE_PROBE,
-            VOLTAGE_DIVIDER_BATTERY_RESISTOR_AFTER_PROBE,
-        );
-
-        // Status of the pressure sensor voltage
-        let channel_a2_voltage =
-            calculate_ads1115_voltage(adc.read(channel::SingleA2).unwrap()).await;
-        let pressure_sensor_voltage = calculate_input_voltage_for_voltage_divider(
-            channel_a2_voltage,
-            VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_BEFORE_PROBE,
-            VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_AFTER_PROBE,
-        );
-
-        // Pressure sensor output
-        let channel_a1_voltage =
-            calculate_ads1115_voltage(adc.read(channel::SingleA1).unwrap()).await;
-        let pressure_height = calculate_water_height_from_pressure_sensor_voltage(
-            channel_a1_voltage,
-            PRESSURE_SENSOR_OUTPUT_RESISTOR_AFTER_PROBE,
-            PRESSURE_SENSOR_MAXIMUM_HEIGHT,
-        );
-
-        let data = Ads1115Data {
-            battery_voltage: Voltage::new::<volt>(battery_voltage),
-            pressure_sensor_voltage: Voltage::new::<volt>(pressure_sensor_voltage),
-            height_above_sensor: Length::new::<meter>(pressure_height),
-        };
-
-        drop(collected_data.push(data));
-    }
-
     // Average the readings. Ideally throw out outliers
+    let mut sum_of_brightness: f32 = 0.0;
     let mut sum_of_battery_voltage: f32 = 0.0;
     let mut sum_of_sensor_voltage: f32 = 0.0;
     let mut sum_of_height: f32 = 0.0;
     for n in 0..collected_data.len() {
         let data = &collected_data[n];
+        sum_of_brightness += data.enclosure_relative_brightness.get::<percent>();
         sum_of_battery_voltage += data.battery_voltage.get::<volt>();
         sum_of_sensor_voltage += data.pressure_sensor_voltage.get::<volt>();
         sum_of_height += data.height_above_sensor.get::<meter>();
     }
 
     let number_of_measurements = collected_data.len() as f32;
+    let final_brightness = Ratio::new::<percent>(sum_of_brightness / number_of_measurements);
     let final_battery_voltage =
         Voltage::new::<volt>(sum_of_battery_voltage / number_of_measurements);
     let final_sensor_voltage = Voltage::new::<volt>(sum_of_sensor_voltage / number_of_measurements);
     let final_height = Length::new::<meter>(sum_of_height / number_of_measurements);
-    let final_data = Ads1115Data::from((final_battery_voltage, final_sensor_voltage, final_height));
+    let final_data = Ads1115Data::from((
+        final_brightness,
+        final_battery_voltage,
+        final_sensor_voltage,
+        final_height,
+    ));
 
     Ok(final_data)
 }
@@ -333,7 +300,7 @@ async fn read_bme280(
     .await;
 
     let mut collected_data = Vec::<Bme280Data, NUMBER_OF_SAMPLES>::new();
-    for n in 0..NUMBER_OF_SAMPLES {
+    for _n in 0..NUMBER_OF_SAMPLES {
         let sample_result = sample_environmental_data(sensor, rng).await;
         match sample_result {
             Ok(r) => drop(collected_data.push(r)),
@@ -363,7 +330,7 @@ async fn read_bme280(
     let final_temperature =
         Temperature::new::<degree_celsius>(sum_of_temperature / number_of_measurements);
     let final_pressure = Pressure::new::<hectopascal>(sum_of_pressure / number_of_measurements);
-    let final_humidity = Humidity::new::<percent>(sum_of_humidity / number_of_measurements);
+    let final_humidity = Ratio::new::<percent>(sum_of_humidity / number_of_measurements);
     let final_data = Bme280Data::from((final_temperature, final_humidity, final_pressure));
 
     Ok(final_data)
@@ -372,8 +339,7 @@ async fn read_bme280(
 #[embassy_executor::task]
 pub async fn read_sensor_data_task(
     peripherals: SensorPeripherals,
-    sender: Sender<'static, NoopRawMutex, (Epoch, Bme280Data, Ads1115Data), 3>,
-    clock: Clock,
+    sender: Sender<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
 ) {
     info!("Create I²C bus for the BME280");
     let i2c_config = I2cConfig {
@@ -403,8 +369,69 @@ pub async fn read_sensor_data_task(
 
     let _ = ads1115_sensor.destroy_ads1115();
 
-    let now = clock.now();
-    sender.send((now, bme280_data, ads1115_data)).await;
+    sender.send((bme280_data, ads1115_data)).await;
+}
+
+async fn sample_voltage_data(adc: &mut Adc<'_>) -> Result<Ads1115Data, SensorError> {
+    info!("Reading voltages from ADS1115 ...");
+
+    // Status of the LDR
+    let ldr_voltage = calculate_ads1115_voltage(block!(adc.read(channel::SingleA0)).unwrap()).await;
+    let relative_brightness = ldr_voltage / MPU_OUTPUT_VOLTAGE;
+
+    // Status of the battery
+    let channel_a3_voltage =
+        calculate_ads1115_voltage(block!(adc.read(channel::SingleA3)).unwrap()).await;
+    let battery_voltage = calculate_input_voltage_for_voltage_divider(
+        channel_a3_voltage,
+        VOLTAGE_DIVIDER_BATTERY_RESISTOR_BEFORE_PROBE,
+        VOLTAGE_DIVIDER_BATTERY_RESISTOR_AFTER_PROBE,
+    );
+
+    // Status of the pressure sensor voltage
+    let channel_a2_voltage =
+        calculate_ads1115_voltage(block!(adc.read(channel::SingleA2)).unwrap()).await;
+    let pressure_sensor_voltage = calculate_input_voltage_for_voltage_divider(
+        channel_a2_voltage,
+        VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_BEFORE_PROBE,
+        VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_AFTER_PROBE,
+    );
+
+    // Pressure sensor output
+    let channel_a1_voltage =
+        calculate_ads1115_voltage(block!(adc.read(channel::SingleA1)).unwrap()).await;
+    let pressure_height = calculate_water_height_from_pressure_sensor_voltage(
+        channel_a1_voltage,
+        PRESSURE_SENSOR_OUTPUT_RESISTOR_AFTER_PROBE,
+        PRESSURE_SENSOR_MAXIMUM_HEIGHT,
+    );
+
+    let sample = Ads1115Data {
+        enclosure_relative_brightness: Ratio::new::<percent>(relative_brightness),
+        battery_voltage: Voltage::new::<volt>(battery_voltage),
+        pressure_sensor_voltage: Voltage::new::<volt>(pressure_sensor_voltage),
+        height_above_sensor: Length::new::<meter>(pressure_height),
+    };
+
+    debug!(
+        " ┣ Enclosure brightness:    {:.2} V",
+        sample.enclosure_relative_brightness.get::<percent>()
+    );
+
+    debug!(
+        " ┣ Battery voltage:         {:.2} V",
+        sample.battery_voltage.get::<volt>()
+    );
+    debug!(
+        " ┣ Pressure sensor voltage: {:.2} V",
+        sample.pressure_sensor_voltage.get::<volt>()
+    );
+    debug!(
+        " ┗ Liquid height:           {:.2} m",
+        sample.height_above_sensor.get::<meter>()
+    );
+
+    Ok(sample)
 }
 
 /// Sample sensor and send reading to receiver
@@ -437,4 +464,49 @@ async fn sample_environmental_data(
     );
 
     Ok(sample)
+}
+
+async fn wait_for_pressure_sensor_voltage_to_stabilize(
+    adc: &mut Adc<'_>,
+) -> Result<(), SensorError> {
+    let mut stable_count = 0;
+    loop {
+        debug!("Measuring the pressure sensor voltage ...");
+
+        // Status of the pressure sensor voltage
+        let channel_a2_voltage =
+            calculate_ads1115_voltage(block!(adc.read(channel::SingleA2)).unwrap()).await;
+        let pressure_sensor_voltage = calculate_input_voltage_for_voltage_divider(
+            channel_a2_voltage,
+            VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_BEFORE_PROBE,
+            VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_AFTER_PROBE,
+        );
+
+        debug!("Pressure sensor voltage: {:.2} V", pressure_sensor_voltage);
+
+        let diff = fabsf(EXPECTED_PRESSURE_SENSOR_VOLTAGE - pressure_sensor_voltage);
+        if diff < 0.2 {
+            stable_count += 1;
+        } else {
+            stable_count = 0;
+        }
+
+        debug!(
+            "Pressure sensor voltage has been stable for {} loops",
+            stable_count
+        );
+        if stable_count == 10 {
+            break;
+        }
+
+        let wait_interval = hifitime::Duration::from_seconds(
+            PRESSURE_SENSOR_VOLTAGE_STABILIZATION_CHECK_INTERVAL_IN_SECONDS,
+        );
+        Timer::after(embassy_time::Duration::from_secs(
+            wait_interval.to_seconds() as u64,
+        ))
+        .await;
+    }
+
+    Ok(())
 }

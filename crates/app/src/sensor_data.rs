@@ -8,7 +8,7 @@ use uom::si::electric_potential::volt;
 use uom::si::f32::ElectricPotential as Voltage;
 use uom::si::f32::Length;
 use uom::si::f32::Pressure;
-use uom::si::f32::Ratio as Humidity;
+use uom::si::f32::Ratio;
 use uom::si::f32::ThermodynamicTemperature as Temperature;
 use uom::si::length::meter;
 use uom::si::pressure::hectopascal;
@@ -25,7 +25,8 @@ pub const TIME_BETWEEN_SAMPLES_IN_SECONDS: f64 = 0.1;
 
 #[derive(Clone, Debug, Default)]
 pub struct Ads1115Data {
-    /// Battery voltage
+    pub enclosure_relative_brightness: Ratio,
+
     pub battery_voltage: Voltage,
 
     pub pressure_sensor_voltage: Voltage,
@@ -37,15 +38,18 @@ impl Ads1115Data {
     /// Construct a random sample
     #[expect(clippy::cast_precision_loss, reason = "Acceptable precision loss")]
     pub fn random(rng: &mut Rng) -> Self {
+        let brightness_seed = rng.random() as f32 / u32::MAX as f32;
         let battery_voltage_seed = rng.random() as f32 / u32::MAX as f32;
         let pressure_sensor_voltage_seed = rng.random() as f32 / u32::MAX as f32;
         let height_above_sensor_seed = rng.random() as f32 / u32::MAX as f32;
 
-        let battery_voltage = battery_voltage_seed * (30.0 - 15.0) + 15.0;
-        let pressure_sensor_voltage = pressure_sensor_voltage_seed * (80.0 - 20.0) + 20.0;
+        let brightness = brightness_seed * (100.0 - 50.0) + 50.0;
+        let battery_voltage = battery_voltage_seed * (12.0 - 6.0) + 6.0;
+        let pressure_sensor_voltage = pressure_sensor_voltage_seed * (24.0 - 12.0) + 12.0;
         let height_above_sensor = height_above_sensor_seed * (1010.0 - 990.0) + 990.0;
 
         Self::from((
+            Ratio::new::<percent>(brightness),
             Voltage::new::<volt>(battery_voltage),
             Voltage::new::<volt>(pressure_sensor_voltage),
             Length::new::<meter>(height_above_sensor),
@@ -53,11 +57,17 @@ impl Ads1115Data {
     }
 }
 
-impl From<(Voltage, Voltage, Length)> for Ads1115Data {
+impl From<(Ratio, Voltage, Voltage, Length)> for Ads1115Data {
     fn from(
-        (battery_voltage, pressure_sensor_voltage, height_above_sensor): (Voltage, Voltage, Length),
+        (
+            enclosure_relative_brightness,
+            battery_voltage,
+            pressure_sensor_voltage,
+            height_above_sensor,
+        ): (Ratio, Voltage, Voltage, Length),
     ) -> Self {
         Self {
+            enclosure_relative_brightness,
             battery_voltage,
             pressure_sensor_voltage,
             height_above_sensor,
@@ -88,7 +98,7 @@ pub struct Bme280Data {
     pub temperature: Temperature,
 
     /// Humidity
-    pub humidity: Humidity,
+    pub humidity: Ratio,
 
     /// Air Pressure
     pub pressure: Pressure,
@@ -108,14 +118,14 @@ impl Bme280Data {
 
         Self::from((
             Temperature::new::<degree_celsius>(temperature),
-            Humidity::new::<percent>(humidity),
+            Ratio::new::<percent>(humidity),
             Pressure::new::<hectopascal>(pressure),
         ))
     }
 }
 
-impl From<(Temperature, Humidity, Pressure)> for Bme280Data {
-    fn from((temperature, humidity, pressure): (Temperature, Humidity, Pressure)) -> Self {
+impl From<(Temperature, Ratio, Pressure)> for Bme280Data {
+    fn from((temperature, humidity, pressure): (Temperature, Ratio, Pressure)) -> Self {
         Self {
             temperature,
             humidity,
