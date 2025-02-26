@@ -5,12 +5,10 @@
 
 use core::convert::Infallible;
 
-use clock::load_clock;
 use embassy_net::Stack;
 use esp_hal::time::now;
 use esp_hal::time::Instant;
 use esp_wifi::wifi::WifiController;
-use hifitime::Epoch;
 use log::error;
 use log::info;
 
@@ -52,10 +50,6 @@ mod board_components;
 
 mod cell;
 use self::cell::SyncUnsafeCell;
-
-mod clock;
-use self::clock::Clock;
-use self::clock::Error as ClockError;
 
 mod data_recording;
 use self::data_recording::update_task as send_data_task;
@@ -105,7 +99,7 @@ const HEAP_MEMORY_SIZE: usize = 72 * 1024;
 static DATA_SEND_CHANNEL: StaticCell<Channel<NoopRawMutex, bool, 3>> = StaticCell::new();
 
 /// A channel between the sensors and data processor
-static SENSOR_CHANNEL: StaticCell<Channel<NoopRawMutex, (Epoch, Bme280Data, Ads1115Data), 3>> =
+static SENSOR_CHANNEL: StaticCell<Channel<NoopRawMutex, (Bme280Data, Ads1115Data), 3>> =
     StaticCell::new();
 
 /// Stored boot count between deep sleep cycles
@@ -134,13 +128,6 @@ enum Error {
     Wifi {
         #[from]
         source: WifiError,
-    },
-
-    /// An error within clock operations
-    #[error("An error within clock operations")]
-    Clock {
-        #[from]
-        source: ClockError,
     },
 }
 
@@ -193,7 +180,7 @@ async fn main(spawner: Spawner) {
 
 /// Main task that can return an error
 async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
-    let peripherals = initialize_esp_hal({
+    let mut peripherals = initialize_esp_hal({
         let mut config = EspConfig::default();
         config.cpu_clock = CpuClock::max();
         config
@@ -203,73 +190,84 @@ async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
 
     let start_time = now();
 
-    // Start the wifi
     {
-        let systimer = SystemTimer::new(peripherals.SYSTIMER).split::<Target>();
-        initialize_embassy(systimer.alarm0);
+        // main loop
+        {
+            let systimer = SystemTimer::new(peripherals.SYSTIMER).split::<Target>();
+            initialize_embassy(systimer.alarm0);
 
-        let rng = Rng::new(peripherals.RNG);
+            let rng = Rng::new(&mut peripherals.RNG);
 
-        let (mut wifi_guard, stack) = connect_to_wifi(
-            spawner,
-            peripherals.TIMG0,
-            peripherals.WIFI,
-            peripherals.RADIO_CLK,
-            rng,
-        )
-        .await?;
-
-        let clock = load_clock(stack).await?;
-        info!("Now is {}", clock.now());
-
-        let data_sent_channel: &'static mut _ = DATA_SEND_CHANNEL.init(Channel::new());
-        let data_sent_receiver = data_sent_channel.receiver();
-        let data_sent_sender = data_sent_channel.sender();
-
-        info!("Setup data sending task");
-        let sensor_data_sender =
-            setup_data_transmitting_task(spawner, stack, data_sent_sender, boot_count, start_time)?;
-
-        // Number of samples
-
-        info!("Setup environment sensor task");
-        setup_sensor_task(
-            spawner,
-            SensorPeripherals {
-                sda: peripherals.GPIO10,
-                scl: peripherals.GPIO11,
-                pressure_sensor_enable: peripherals.GPIO18,
-                i2c0: peripherals.I2C0,
+            let (mut wifi_guard, stack) = connect_to_wifi(
+                spawner,
+                peripherals.TIMG0,
+                peripherals.WIFI,
+                peripherals.RADIO_CLK,
                 rng,
-            },
-            clock.clone(),
-            sensor_data_sender,
-        );
+            )
+            .await?;
 
-        info!("Waiting for sensors to complete tasks");
-        let was_processed = data_sent_receiver.receive().await;
-        if !was_processed {
-            error!("Failed to process the data");
-        }
+            // Get duration for operations
+            let current_time = now();
+            let wifi_start_time_in_micro_seconds = current_time
+                .checked_duration_since(start_time)
+                .unwrap()
+                .to_micros();
 
-        info!("Wait for {}s", WAIT_AFTER_SENT_PERIOD_IN_SECONDS);
-        Timer::after(embassy_time::Duration::from_secs(
-            WAIT_AFTER_SENT_PERIOD_IN_SECONDS,
-        ))
-        .await;
+            let data_sent_channel: &'static mut _ = DATA_SEND_CHANNEL.init(Channel::new());
+            let data_sent_receiver = data_sent_channel.receiver();
+            let data_sent_sender = data_sent_channel.sender();
 
-        info!("Saving time to RTC memory ...");
-        clock.save_to_rtc_memory(hifitime::Duration::from_seconds(
-            DEEP_SLEEP_DURATION_IN_SECONDS as f64,
-        ));
+            info!("Setup data sending task");
+            let sensor_data_sender = setup_data_transmitting_task(
+                spawner,
+                stack,
+                data_sent_sender,
+                boot_count,
+                start_time,
+                wifi_start_time_in_micro_seconds,
+            )?;
 
-        // If something goes wrong before this point then the guard is dropped which causes
-        // the wifi to disconnect. If that
-        info!("Checking wifi status ...");
-        let connected_result = wifi_guard.is_connected();
-        if connected_result.is_ok() && connected_result.unwrap() {
-            info!("Disconnecting from wifi ...");
-            let _ = wifi_guard.disconnect();
+            // Number of samples
+
+            info!("Setup environment sensor task");
+            setup_sensor_task(
+                spawner,
+                SensorPeripherals {
+                    sda: peripherals.GPIO10,
+                    scl: peripherals.GPIO11,
+                    pressure_sensor_enable: peripherals.GPIO18,
+                    i2c0: peripherals.I2C0,
+                    rng,
+                },
+                sensor_data_sender,
+            );
+
+            info!("Waiting for sensors to complete tasks");
+            let was_processed = data_sent_receiver.receive().await;
+            if !was_processed {
+                error!("Failed to process the data");
+            }
+
+            info!("Wait for {}s", WAIT_AFTER_SENT_PERIOD_IN_SECONDS);
+            Timer::after(embassy_time::Duration::from_secs(
+                WAIT_AFTER_SENT_PERIOD_IN_SECONDS,
+            ))
+            .await;
+
+            // info!("Saving time to RTC memory ...");
+            // clock.save_to_rtc_memory(hifitime::Duration::from_seconds(
+            //     DEEP_SLEEP_DURATION_IN_SECONDS as f64,
+            // ));
+
+            // If something goes wrong before this point then the guard is dropped which causes
+            // the wifi to disconnect. If that
+            info!("Checking wifi status ...");
+            let connected_result = wifi_guard.is_connected();
+            if connected_result.is_ok() && connected_result.unwrap() {
+                info!("Disconnecting from wifi ...");
+                let _ = wifi_guard.disconnect();
+            }
         }
     }
 
@@ -289,7 +287,8 @@ fn setup_data_transmitting_task(
     data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
     boot_count: u32,
     system_start_time: Instant,
-) -> Result<Sender<'static, NoopRawMutex, (Epoch, Bme280Data, Ads1115Data), 3>, Error> {
+    wifi_start_time_in_micro_seconds: u64,
+) -> Result<Sender<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>, Error> {
     info!("Create channel");
     let sensor_channel: &'static mut _ = SENSOR_CHANNEL.init(Channel::new());
     let sensor_receiver = sensor_channel.receiver();
@@ -302,6 +301,7 @@ fn setup_data_transmitting_task(
         data_sent_sender,
         boot_count,
         system_start_time,
+        wifi_start_time_in_micro_seconds,
     ));
 
     Ok(sensor_sender)
@@ -311,9 +311,8 @@ fn setup_data_transmitting_task(
 fn setup_sensor_task(
     spawner: Spawner,
     peripherals: SensorPeripherals,
-    clock: Clock,
-    sender: Sender<'static, NoopRawMutex, (Epoch, Bme280Data, Ads1115Data), 3>,
+    sender: Sender<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
 ) {
     info!("Spawning environmental sensor task");
-    spawner.must_spawn(read_sensor_data_task(peripherals, sender, clock));
+    spawner.must_spawn(read_sensor_data_task(peripherals, sender));
 }

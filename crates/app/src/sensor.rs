@@ -9,6 +9,7 @@ use esp_hal::i2c::master::Config as I2cConfig;
 use esp_hal::i2c::master::Error as I2cError;
 use esp_hal::i2c::master::I2c;
 use esp_hal::peripherals::I2C0;
+use esp_hal::prelude::nb::block;
 use esp_hal::prelude::*; // RateExtU32, main, ram
 use esp_hal::rng::Rng;
 use esp_hal::Async;
@@ -27,8 +28,6 @@ use bme280_rs::SensorMode;
 
 use heapless::Vec;
 
-use hifitime::Epoch;
-
 use libm::fabsf;
 
 use log::debug;
@@ -45,10 +44,10 @@ use uom::si::electric_potential::volt;
 use uom::si::f32::ElectricPotential as Voltage;
 use uom::si::f32::Length;
 use uom::si::f32::Pressure;
-use uom::si::f32::Ratio as Humidity;
+use uom::si::f32::Ratio;
 use uom::si::f32::ThermodynamicTemperature as Temperature;
 use uom::si::length::meter;
-use uom::si::pressure::hectopascal;
+use uom::si::pressure::{self, hectopascal};
 use uom::si::ratio::percent;
 use uom::si::thermodynamic_temperature::degree_celsius;
 
@@ -61,8 +60,6 @@ use crate::board_components::{
     VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_AFTER_PROBE,
     VOLTAGE_DIVIDER_PRESSURE_SENSOR_RESISTOR_BEFORE_PROBE,
 };
-use crate::clock::Clock;
-use crate::clock::Error as ClockError;
 use crate::sensor_data::Ads1115Data;
 use crate::sensor_data::Bme280Data;
 use crate::sensor_data::Error as DomainError;
@@ -83,10 +80,9 @@ const EXPECTED_PRESSURE_SENSOR_VOLTAGE: f32 = 24.0;
 /// Error within sensor sampling
 #[derive(Debug, Error)]
 enum SensorError {
-    /// Error from clock
-    #[error("There was an error from the clock")]
-    Clock(#[expect(unused, reason = "Never read directly")] ClockError),
-
+    // /// Error from clock
+    // #[error("There was an error from the clock")]
+    // Clock(#[expect(unused, reason = "Never read directly")] ClockError),
     /// Error from domain
     #[error("There was an error from the domain")]
     Domain(DomainError),
@@ -108,11 +104,11 @@ enum SensorError {
     PressureSensorVoltageNotStable,
 }
 
-impl From<ClockError> for SensorError {
-    fn from(error: ClockError) -> Self {
-        Self::Clock(error)
-    }
-}
+// impl From<ClockError> for SensorError {
+//     fn from(error: ClockError) -> Self {
+//         Self::Clock(error)
+//     }
+// }
 
 impl From<DomainError> for SensorError {
     fn from(error: DomainError) -> Self {

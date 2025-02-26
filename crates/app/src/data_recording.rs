@@ -7,9 +7,9 @@ use embassy_sync::channel::Sender;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Receiver};
 
 use esp_hal::time::{now, Instant};
+use esp_wifi::wifi;
 use heapless::String;
 
-use hifitime::Epoch;
 use log::info;
 use log::{debug, error};
 
@@ -44,10 +44,10 @@ pub enum Error {
 // Use the influx line protocol from here: https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/
 fn format_metrics(
     boot_count: u32,
-    timestamp: Epoch,
     bme280_data: Bme280Data,
     ads1115_data: Ads1115Data,
     run_time_in_micro_seconds: u64,
+    wifi_start_time: u64,
 ) -> String<512> {
     let temperature = bme280_data.temperature;
     let humidity = bme280_data.humidity;
@@ -59,17 +59,16 @@ fn format_metrics(
     // liquid_temperature: f32
 
     // The influx timestamp should be in nano seconds
-    let unix_timestamp = timestamp.to_unix_milliseconds() * 1e-3;
     let mut buffer: String<512> = String::new();
 
     writeln!(
         buffer,
-        "{{\"device_id\":\"{device_id}\",\"firmware_version\":\"{firmware_version}\",\"boot_count\":{boot_count},\"unix_time_in_seconds\":{unix_timestamp},\"run_time_in_seconds\":{run_time:.3},\"temperature_in_celcius\":{temperature:.2},\"humidity_in_percent\":{humidity:.2},\"pressure_in_pascal\":{pressure:.1},\"battery_voltage\":{battery_voltage:.3},\"pressure_sensor_voltage\":{pressure_sensor_voltage:.3},\"tank_level_in_meters\":{tank_level:.3},\"tank_temperature_in_celcius\":{tank_temperature:.2}}}",
+        "{{\"device_id\":\"{device_id}\",\"firmware_version\":\"{firmware_version}\",\"boot_count\":{boot_count},\"run_time_in_seconds\":{run_time:.3},\"wifi_start_time_in_seconds\":{wifi_start_time:.3},\"temperature_in_celcius\":{temperature:.2},\"humidity_in_percent\":{humidity:.2},\"pressure_in_pascal\":{pressure:.1},\"battery_voltage\":{battery_voltage:.3},\"pressure_sensor_voltage\":{pressure_sensor_voltage:.3},\"tank_level_in_meters\":{tank_level:.3},\"tank_temperature_in_celcius\":{tank_temperature:.2}}}",
         device_id=DEVICE_LOCATION,
         firmware_version=CARGO_PKG_VERSION.unwrap_or("NOT FOUND"),
         boot_count=boot_count,
-        unix_timestamp=unix_timestamp,
         run_time=(run_time_in_micro_seconds as f64) * 1e-6,
+        wifi_start_time = (wifi_start_time as f64) * 1e-6,
         temperature=temperature.get::<degree_celsius>(),
         humidity=humidity.get::<percent>(),
         pressure=air_pressure.get::<pascal>(),
@@ -83,12 +82,11 @@ fn format_metrics(
     buffer
 }
 
-fn log_ads1115_reading(time: &Epoch, sample: &Ads1115Data) {
+fn log_ads1115_reading(sample: &Ads1115Data) {
     let battery_voltage = sample.battery_voltage.get::<volt>();
     let pressure_sensor_voltage = sample.pressure_sensor_voltage.get::<volt>();
     let height_above_sensor = sample.height_above_sensor.get::<meter>();
 
-    info!("Received sample at {:?}", time);
     info!(" ┣ Battery voltage:            {:.2} V", battery_voltage);
     info!(
         " ┣ Pressure sensor voltage:    {:.2} V",
@@ -100,25 +98,24 @@ fn log_ads1115_reading(time: &Epoch, sample: &Ads1115Data) {
     );
 }
 
-fn log_bme280_reading(time: &Epoch, sample: &Bme280Data) {
+fn log_bme280_reading(sample: &Bme280Data) {
     let temperature = sample.temperature.get::<degree_celsius>();
     let humidity = sample.humidity.get::<percent>();
     let pressure = sample.pressure.get::<hectopascal>();
 
-    info!("Received sample at {:?}", time);
     info!(" ┣ Temperature: {:.2} C", temperature);
     info!(" ┣ Humidity:    {:.2} %", humidity);
     info!(" ┗ Pressure:    {:.2} hPa", pressure);
 }
 
 async fn receive_sensor_data(
-    receiver: &Receiver<'static, NoopRawMutex, (Epoch, Bme280Data, Ads1115Data), 3>,
-) -> Result<(Epoch, Bme280Data, Ads1115Data), Error> {
+    receiver: &Receiver<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
+) -> Result<(Bme280Data, Ads1115Data), Error> {
     info!("Wait for data from the sensors ...");
 
     let reading = receiver.receive().await;
-    log_ads1115_reading(&reading.0, &reading.2);
-    log_bme280_reading(&reading.0, &reading.1);
+    log_ads1115_reading(&reading.1);
+    log_bme280_reading(&reading.0);
 
     Ok(reading)
 }
@@ -126,19 +123,19 @@ async fn receive_sensor_data(
 async fn send_metrics<'a>(
     stack: Stack<'a>,
     boot_count: u32,
-    timestamp: Epoch,
     bme280_data: Bme280Data,
     ads1115_data: Ads1115Data,
     run_time_in_micro_seconds: u64,
+    wifi_start_time: u64,
 ) -> Result<(), Error> {
     info!("Sending metrics ...");
 
     let metrics = format_metrics(
         boot_count,
-        timestamp,
         bme280_data,
         ads1115_data,
         run_time_in_micro_seconds,
+        wifi_start_time,
     );
     let bytes = metrics.as_bytes();
 
@@ -146,17 +143,6 @@ async fn send_metrics<'a>(
 
     let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
     let tcp_client = TcpClient::new(stack, &tcp_client_state);
-
-    // let seed = rng_wrapper.next_u64();
-    // let mut read_record_buffer = [0_u8; 16640];
-    // let mut write_record_buffer = [0_u8; 16640];
-
-    // let tls_config = TlsConfig::new(
-    //     seed,
-    //     &mut read_record_buffer,
-    //     &mut write_record_buffer,
-    //     TlsVerify::None,
-    // );
 
     debug!("Creating HTTP client ...");
     let mut client = HttpClient::new(&tcp_client, &dns_socket);
@@ -167,7 +153,6 @@ async fn send_metrics<'a>(
     let response = resource
         .post("/api/v1/sensor")
         .content_type(ContentType::ApplicationJson)
-        //.basic_auth(GRAFANA_USER_NAME, GRAFANA_API_KEY)
         .body(bytes);
 
     debug!("Sending request ...");
@@ -194,20 +179,20 @@ async fn send_metrics<'a>(
 #[embassy_executor::task]
 pub async fn update_task(
     stack: Stack<'static>,
-    sensor_data_receiver: Receiver<'static, NoopRawMutex, (Epoch, Bme280Data, Ads1115Data), 3>,
+    sensor_data_receiver: Receiver<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
     data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
     boot_count: u32,
     system_start_time: Instant,
+    wifi_start_time: u64,
 ) {
     // Get data from the sensors
-    let (epoch, bme280_reading, ads1115_reading) =
-        match receive_sensor_data(&sensor_data_receiver).await {
-            Ok(r) => r,
-            Err(e) => {
-                error!("Failed to read the environmental data: {e:?}");
-                return;
-            }
-        };
+    let (bme280_reading, ads1115_reading) = match receive_sensor_data(&sensor_data_receiver).await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to read the environmental data: {e:?}");
+            return;
+        }
+    };
 
     // Get duration for operations
     let current_time = now();
@@ -220,10 +205,10 @@ pub async fn update_task(
     if let Err(error) = send_metrics(
         stack,
         boot_count,
-        epoch,
         bme280_reading,
         ads1115_reading,
         run_time_in_micro_seconds,
+        wifi_start_time,
     )
     .await
     {
