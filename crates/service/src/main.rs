@@ -23,8 +23,11 @@ use opentelemetry::{global, InstrumentationScope};
 use opentelemetry::{metrics::Meter, trace::TraceError};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
-use opentelemetry_sdk::logs::{LogError, LoggerProvider};
 use opentelemetry_sdk::metrics::{MetricError, PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::{
+    logs::{LogError, LoggerProvider},
+    metrics::Temporality,
+};
 use opentelemetry_sdk::{runtime, trace as sdktrace, Resource};
 use tracing::{debug, error, info, instrument};
 use tracing_subscriber::layer::SubscriberExt;
@@ -210,6 +213,7 @@ fn init_metrics(
     let exporter = MetricExporter::builder()
         .with_tonic()
         .with_endpoint(config.metrics_push_url.clone())
+        .with_temporality(Temporality::Delta) // Measurements at different times don't mix
         .build()?;
 
     let reader = PeriodicReader::builder(exporter, runtime::Tokio).build();
