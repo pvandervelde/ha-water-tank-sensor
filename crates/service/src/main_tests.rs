@@ -10,7 +10,8 @@ fn create_valid_sensor_data() -> SensorData {
         device_id: "test-device-001".to_string(),
         firmware_version: "1.0.0".to_string(),
         boot_count: 1,
-        unix_time_in_seconds: 1735642800.0 + 3600.0, // Jan 1st 2025 + 1 hour
+        run_time_in_seconds: 10.5,
+        wifi_start_time_in_seconds: 2.5,
         temperature_in_celcius: 25.0,
         humidity_in_percent: 50.0,
         pressure_in_pascal: 101325.0, // standard atmospheric pressure
@@ -43,15 +44,30 @@ fn test_invalid_boot_count() {
 }
 
 #[test]
-fn test_invalid_timestamp() {
+fn test_invalid_run_time() {
     let mut data = create_valid_sensor_data();
-    data.unix_time_in_seconds = 1735642799.0; // Just before Jan 1st 2025
+    data.run_time_in_seconds = -1.0;
+    let result = data.validate();
+    assert!(result.is_err(), "A negative run time should be invalid");
+    assert_eq!(
+        result.unwrap_err(),
+        "Run time out of reasonable range (> 0.0)".to_string()
+    );
+}
+
+#[test]
+fn test_invalid_wifi_start_time() {
+    let mut data = create_valid_sensor_data();
+    data.wifi_start_time_in_seconds = -1.0;
     let result = data.validate();
     assert!(
         result.is_err(),
-        "Timestamp before Jan 1st 2025 should be invalid"
+        "A negative wifi start time should be invalid"
     );
-    assert_eq!(result.unwrap_err(), "Invalid timestamp".to_string());
+    assert_eq!(
+        result.unwrap_err(),
+        "Wifi start time out of reasonable range (> 0.0)".to_string()
+    );
 }
 
 #[test]
@@ -235,7 +251,8 @@ fn test_boundary_values() {
 
     // Test lower boundaries
     data.boot_count = 1;
-    data.unix_time_in_seconds = 1735642800.0;
+    data.run_time_in_seconds = 0.0;
+    data.wifi_start_time_in_seconds = 0.0;
     data.temperature_in_celcius = -50.0;
     data.humidity_in_percent = 0.0;
     data.pressure_in_pascal = 50.0e3;
@@ -312,7 +329,8 @@ async fn test_handle_sensor_data_valid() {
         device_id: "test-device-001".to_string(),
         firmware_version: "1.0.0".to_string(),
         boot_count: 1,
-        unix_time_in_seconds: 1735642800.0 + 3600.0, // Jan 1st 2025 + 1 hour
+        run_time_in_seconds: 10.5,
+        wifi_start_time_in_seconds: 2.5,
         temperature_in_celcius: 25.0,
         humidity_in_percent: 50.0,
         pressure_in_pascal: 101325.0, // standard atmospheric pressure
@@ -341,7 +359,8 @@ async fn test_handle_sensor_data_invalid() {
         device_id: "test-device-001".to_string(),
         firmware_version: "1.0.0".to_string(),
         boot_count: 0, // Invalid boot count
-        unix_time_in_seconds: 1735642800.0 + 3600.0,
+        run_time_in_seconds: 10.5,
+        wifi_start_time_in_seconds: 2.5,
         temperature_in_celcius: 25.0,
         humidity_in_percent: 50.0,
         pressure_in_pascal: 101325.0,
