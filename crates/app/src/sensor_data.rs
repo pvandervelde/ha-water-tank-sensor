@@ -4,10 +4,13 @@
 
 use esp_hal::rng::Rng;
 
-use hifitime::Epoch;
+use uom::si::electric_potential::volt;
+use uom::si::f32::ElectricPotential as Voltage;
+use uom::si::f32::Length;
 use uom::si::f32::Pressure;
-use uom::si::f32::Ratio as Humidity;
+use uom::si::f32::Ratio;
 use uom::si::f32::ThermodynamicTemperature as Temperature;
+use uom::si::length::meter;
 use uom::si::pressure::hectopascal;
 use uom::si::ratio::percent;
 use uom::si::thermodynamic_temperature::degree_celsius;
@@ -20,21 +23,88 @@ pub const NUMBER_OF_SAMPLES: usize = 5;
 /// Period to wait between readings (100 milliseconds, aka 0.1 seconds)
 pub const TIME_BETWEEN_SAMPLES_IN_SECONDS: f64 = 0.1;
 
+#[derive(Clone, Debug, Default)]
+pub struct Ads1115Data {
+    pub enclosure_relative_brightness: Ratio,
+
+    pub battery_voltage: Voltage,
+
+    pub pressure_sensor_voltage: Voltage,
+
+    pub height_above_sensor: Length,
+}
+
+impl Ads1115Data {
+    /// Construct a random sample
+    #[expect(clippy::cast_precision_loss, reason = "Acceptable precision loss")]
+    pub fn random(rng: &mut Rng) -> Self {
+        let brightness_seed = rng.random() as f32 / u32::MAX as f32;
+        let battery_voltage_seed = rng.random() as f32 / u32::MAX as f32;
+        let pressure_sensor_voltage_seed = rng.random() as f32 / u32::MAX as f32;
+        let height_above_sensor_seed = rng.random() as f32 / u32::MAX as f32;
+
+        let brightness = brightness_seed * (100.0 - 50.0) + 50.0;
+        let battery_voltage = battery_voltage_seed * (12.0 - 6.0) + 6.0;
+        let pressure_sensor_voltage = pressure_sensor_voltage_seed * (24.0 - 12.0) + 12.0;
+        let height_above_sensor = height_above_sensor_seed * (1010.0 - 990.0) + 990.0;
+
+        Self::from((
+            Ratio::new::<percent>(brightness),
+            Voltage::new::<volt>(battery_voltage),
+            Voltage::new::<volt>(pressure_sensor_voltage),
+            Length::new::<meter>(height_above_sensor),
+        ))
+    }
+}
+
+impl From<(Ratio, Voltage, Voltage, Length)> for Ads1115Data {
+    fn from(
+        (
+            enclosure_relative_brightness,
+            battery_voltage,
+            pressure_sensor_voltage,
+            height_above_sensor,
+        ): (Ratio, Voltage, Voltage, Length),
+    ) -> Self {
+        Self {
+            enclosure_relative_brightness,
+            battery_voltage,
+            pressure_sensor_voltage,
+            height_above_sensor,
+        }
+    }
+}
+
+// impl TryFrom<Bme280Sample> for Ads1115Data {
+//     type Error = Error;
+
+//     fn try_from(sample: Bme280Sample) -> Result<Self, Self::Error> {
+//         let temperature = sample.temperature.ok_or(Self::Error::MissingMeasurement)?;
+//         let humidity = sample.humidity.ok_or(Self::Error::MissingMeasurement)?;
+//         let pressure = sample.pressure.ok_or(Self::Error::MissingMeasurement)?;
+//         Ok(Self {
+//             temperature,
+//             humidity,
+//             pressure,
+//         })
+//     }
+// }
+
 /// The data recorded from the BME280. It provides the environmental data (temperature, pressure, humidity)
 /// for the enclosure.
 #[derive(Clone, Debug, Default)]
-pub struct EnvironmentalData {
+pub struct Bme280Data {
     /// Temperature
     pub temperature: Temperature,
 
     /// Humidity
-    pub humidity: Humidity,
+    pub humidity: Ratio,
 
     /// Air Pressure
     pub pressure: Pressure,
 }
 
-impl EnvironmentalData {
+impl Bme280Data {
     /// Construct a random sample
     #[expect(clippy::cast_precision_loss, reason = "Acceptable precision loss")]
     pub fn random(rng: &mut Rng) -> Self {
@@ -48,14 +118,14 @@ impl EnvironmentalData {
 
         Self::from((
             Temperature::new::<degree_celsius>(temperature),
-            Humidity::new::<percent>(humidity),
+            Ratio::new::<percent>(humidity),
             Pressure::new::<hectopascal>(pressure),
         ))
     }
 }
 
-impl From<(Temperature, Humidity, Pressure)> for EnvironmentalData {
-    fn from((temperature, humidity, pressure): (Temperature, Humidity, Pressure)) -> Self {
+impl From<(Temperature, Ratio, Pressure)> for Bme280Data {
+    fn from((temperature, humidity, pressure): (Temperature, Ratio, Pressure)) -> Self {
         Self {
             temperature,
             humidity,
@@ -64,7 +134,7 @@ impl From<(Temperature, Humidity, Pressure)> for EnvironmentalData {
     }
 }
 
-impl TryFrom<Bme280Sample> for EnvironmentalData {
+impl TryFrom<Bme280Sample> for Bme280Data {
     type Error = Error;
 
     fn try_from(sample: Bme280Sample) -> Result<Self, Self::Error> {
@@ -80,9 +150,6 @@ impl TryFrom<Bme280Sample> for EnvironmentalData {
 }
 
 // AD converter data
-
-/// A reading, i.e. a pair (time, sample)
-pub type Reading = (Epoch, EnvironmentalData);
 
 /// An error
 #[derive(Debug)]

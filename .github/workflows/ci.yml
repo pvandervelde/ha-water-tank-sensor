@@ -25,11 +25,12 @@ jobs:
         with:
           target: riscv32imac-unknown-none-elf
           toolchain: stable
+          components: rust-src
       - name: Enable caching
         uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2
       - name: Run command
         working-directory: "crates/app"
-        run: cargo build --release
+        run: cargo build --release --target riscv32imac-unknown-none-elf --verbose
 
   rust-build-service:
     name: Build service

@@ -6,34 +6,29 @@ use embassy_net::{dns::DnsSocket, tcp::client::TcpClient};
 use embassy_sync::channel::Sender;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Receiver};
 
+use esp_hal::time::{now, Instant};
 use heapless::String;
 
-use hifitime::Epoch;
 use log::info;
 use log::{debug, error};
 
-use rand_core::RngCore as _;
-
-use reqwless::client::{HttpClient, TlsConfig, TlsVerify};
-use reqwless::{
-    headers::ContentType,
-    request::{Method, RequestBuilder},
-};
+use reqwless::client::HttpClient;
+use reqwless::{headers::ContentType, request::RequestBuilder};
 
 use thiserror::Error;
 
-use uom::si::angle::degree;
+use uom::si::electric_potential::volt;
+use uom::si::length::meter;
 use uom::si::pressure::pascal;
 use uom::si::{pressure::hectopascal, ratio::percent, thermodynamic_temperature::degree_celsius};
 
 use crate::device_meta::DEVICE_LOCATION;
 use crate::meta::CARGO_PKG_VERSION;
-use crate::random::RngWrapper;
-use crate::sensor_data::{EnvironmentalData, Reading};
+use crate::sensor_data::{Ads1115Data, Bme280Data};
 
-const GRAFANA_CLOUD_URL: &str = env!("GRAFANA_METRICS_URL");
-const GRAFANA_USER_NAME: &str = env!("GRAFANA_USER_NAME");
-const GRAFANA_API_KEY: &str = env!("GRAFANA_METRICS_API_KEY");
+const METRICS_URL: &str = env!("METRICS_URL");
+//const GRAFANA_USER_NAME: &str = env!("GRAFANA_USER_NAME");
+//const GRAFANA_API_KEY: &str = env!("GRAFANA_METRICS_API_KEY");
 
 /// A clock error
 #[derive(Error, Debug)]
@@ -46,36 +41,39 @@ pub enum Error {
 }
 
 // Use the influx line protocol from here: https://docs.influxdata.com/influxdb/v1/write_protocols/line_protocol_tutorial/
-fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<512> {
-    let timestamp = environmental_data.0;
-    let environmental_sample = environmental_data.1;
+fn format_metrics(
+    boot_count: u32,
+    bme280_data: Bme280Data,
+    ads1115_data: Ads1115Data,
+    run_time_in_micro_seconds: u64,
+    wifi_start_time: u64,
+) -> String<512> {
+    let temperature = bme280_data.temperature;
+    let humidity = bme280_data.humidity;
+    let air_pressure = bme280_data.pressure;
 
-    let temperature = environmental_sample.temperature;
-    let humidity = environmental_sample.humidity;
-    let air_pressure = environmental_sample.pressure;
-
-    // battery_voltage: f32,
-    // pressure_sensor_voltage: f32,
-    // liquid_height: f32,
+    let battery_voltage = ads1115_data.battery_voltage;
+    let pressure_sensor_voltage = ads1115_data.pressure_sensor_voltage;
+    let liquid_height = ads1115_data.height_above_sensor;
     // liquid_temperature: f32
 
     // The influx timestamp should be in nano seconds
-    let unix_timestamp = timestamp.to_unix_milliseconds() * 1e-6;
     let mut buffer: String<512> = String::new();
 
     writeln!(
         buffer,
-        "{{\"device_id\":\"{device_id}\",\"firmware_version\":\"{firmware_version}\",\"boot_count\":{boot_count},\"unix_time_in_seconds\":{unix_timestamp},\"temperature_in_celcius\":{temperature},\"humidity_in_percent\":{humidity},\"pressure_in_pascal\":{pressure},\"battery_voltage\":{battery_voltage},\"pressure_sensor_voltage\":{pressure_sensor_voltage},\"tank_level_in_meters\":{tank_level},\"tank_temperature_in_celcius\":{tank_temperature}}}",
+        "{{\"device_id\":\"{device_id}\",\"firmware_version\":\"{firmware_version}\",\"boot_count\":{boot_count},\"run_time_in_seconds\":{run_time:.3},\"wifi_start_time_in_seconds\":{wifi_start_time:.3},\"temperature_in_celcius\":{temperature:.2},\"humidity_in_percent\":{humidity:.2},\"pressure_in_pascal\":{pressure:.1},\"battery_voltage\":{battery_voltage:.3},\"pressure_sensor_voltage\":{pressure_sensor_voltage:.3},\"tank_level_in_meters\":{tank_level:.3},\"tank_temperature_in_celcius\":{tank_temperature:.2}}}",
         device_id=DEVICE_LOCATION,
         firmware_version=CARGO_PKG_VERSION.unwrap_or("NOT FOUND"),
         boot_count=boot_count,
-        unix_timestamp=unix_timestamp,
+        run_time=(run_time_in_micro_seconds as f64) * 1e-6,
+        wifi_start_time = (wifi_start_time as f64) * 1e-6,
         temperature=temperature.get::<degree_celsius>(),
         humidity=humidity.get::<percent>(),
         pressure=air_pressure.get::<pascal>(),
-        battery_voltage=0.0,
-        pressure_sensor_voltage=0.0,
-        tank_level=0.0,
+        battery_voltage=battery_voltage.get::<volt>(),
+        pressure_sensor_voltage=pressure_sensor_voltage.get::<volt>(),
+        tank_level=liquid_height.get::<meter>(),
         tank_temperature=temperature.get::<degree_celsius>(),
     )
     .unwrap();
@@ -83,38 +81,61 @@ fn format_metrics(boot_count: u32, environmental_data: Reading) -> String<512> {
     buffer
 }
 
-/// Print a sample to log
-fn log_sample(time: &Epoch, sample: &EnvironmentalData) {
+fn log_ads1115_reading(sample: &Ads1115Data) {
+    let battery_voltage = sample.battery_voltage.get::<volt>();
+    let pressure_sensor_voltage = sample.pressure_sensor_voltage.get::<volt>();
+    let height_above_sensor = sample.height_above_sensor.get::<meter>();
+
+    info!(" ┣ Battery voltage:            {:.2} V", battery_voltage);
+    info!(
+        " ┣ Pressure sensor voltage:    {:.2} V",
+        pressure_sensor_voltage
+    );
+    info!(
+        " ┗ Liquid height above sensor: {:.2} m",
+        height_above_sensor
+    );
+}
+
+fn log_bme280_reading(sample: &Bme280Data) {
     let temperature = sample.temperature.get::<degree_celsius>();
     let humidity = sample.humidity.get::<percent>();
     let pressure = sample.pressure.get::<hectopascal>();
 
-    info!("Received sample at {:?}", time);
     info!(" ┣ Temperature: {:.2} C", temperature);
     info!(" ┣ Humidity:    {:.2} %", humidity);
     info!(" ┗ Pressure:    {:.2} hPa", pressure);
 }
 
-async fn receive_environmental_data(
-    receiver: &Receiver<'static, NoopRawMutex, Reading, 3>,
-) -> Result<Reading, Error> {
-    info!("Wait for message from sensor");
+async fn receive_sensor_data(
+    receiver: &Receiver<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
+) -> Result<(Bme280Data, Ads1115Data), Error> {
+    info!("Wait for data from the sensors ...");
 
     let reading = receiver.receive().await;
-    log_sample(&reading.0, &reading.1);
+    log_ads1115_reading(&reading.1);
+    log_bme280_reading(&reading.0);
 
     Ok(reading)
 }
 
-async fn send_data_to_grafana<'a>(
+async fn send_metrics<'a>(
     stack: Stack<'a>,
-    rng_wrapper: &mut RngWrapper,
     boot_count: u32,
-    environmental_data: Reading,
+    bme280_data: Bme280Data,
+    ads1115_data: Ads1115Data,
+    run_time_in_micro_seconds: u64,
+    wifi_start_time: u64,
 ) -> Result<(), Error> {
-    info!("Sending data to grafana ...");
+    info!("Sending metrics ...");
 
-    let metrics = format_metrics(boot_count, environmental_data);
+    let metrics = format_metrics(
+        boot_count,
+        bme280_data,
+        ads1115_data,
+        run_time_in_micro_seconds,
+        wifi_start_time,
+    );
     let bytes = metrics.as_bytes();
 
     let dns_socket = DnsSocket::new(stack);
@@ -122,27 +143,15 @@ async fn send_data_to_grafana<'a>(
     let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
     let tcp_client = TcpClient::new(stack, &tcp_client_state);
 
-    let seed = rng_wrapper.next_u64();
-    let mut read_record_buffer = [0_u8; 16640];
-    let mut write_record_buffer = [0_u8; 16640];
-
-    let tls_config = TlsConfig::new(
-        seed,
-        &mut read_record_buffer,
-        &mut write_record_buffer,
-        TlsVerify::None,
-    );
-
     debug!("Creating HTTP client ...");
-    let mut client = HttpClient::new_with_tls(&tcp_client, &dns_socket, tls_config);
+    let mut client = HttpClient::new(&tcp_client, &dns_socket);
 
     debug!("Creating request ...");
     let mut rx_buf = [0; 4096];
-    let mut resource = client.resource(GRAFANA_CLOUD_URL).await.unwrap();
+    let mut resource = client.resource(METRICS_URL).await.unwrap();
     let response = resource
-        .post("push/influx/write")
-        .content_type(ContentType::TextPlain)
-        .basic_auth(GRAFANA_USER_NAME, GRAFANA_API_KEY)
+        .post("/api/v1/sensor")
+        .content_type(ContentType::ApplicationJson)
         .body(bytes);
 
     debug!("Sending request ...");
@@ -152,15 +161,15 @@ async fn send_data_to_grafana<'a>(
     match response {
         Ok(r) => {
             if r.status.is_successful() {
-                debug!("Send data to grafana. Status code: {:?}", r.status);
+                debug!("Sent metrics. Status code: {:?}", r.status);
                 Ok(())
             } else {
-                error!("Failed to send data to grafana: Status code {:?}", r.status,);
+                error!("Failed to send metrics: Status code {:?}", r.status,);
                 Err(Error::NonSuccessResponseCode)
             }
         }
         Err(e) => {
-            error!("Failed to send data to grafana: error {:?}", e);
+            error!("Failed to send metrics: error {:?}", e);
             Err(Error::RequestFailed)
         }
     }
@@ -169,14 +178,14 @@ async fn send_data_to_grafana<'a>(
 #[embassy_executor::task]
 pub async fn update_task(
     stack: Stack<'static>,
-    mut rng_wrapper: RngWrapper,
-    environmental_data_receiver: Receiver<'static, NoopRawMutex, Reading, 3>,
-    //ad_data_receiver: Receiver<'static, NoopRawMutex, Reading, 3>,
+    sensor_data_receiver: Receiver<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
     data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
     boot_count: u32,
+    system_start_time: Instant,
+    wifi_start_time: u64,
 ) {
-    // Get data from environment sensor
-    let reading = match receive_environmental_data(&environmental_data_receiver).await {
+    // Get data from the sensors
+    let (bme280_reading, ads1115_reading) = match receive_sensor_data(&sensor_data_receiver).await {
         Ok(r) => r,
         Err(e) => {
             error!("Failed to read the environmental data: {e:?}");
@@ -184,9 +193,25 @@ pub async fn update_task(
         }
     };
 
+    // Get duration for operations
+    let current_time = now();
+    let run_time_in_micro_seconds = current_time
+        .checked_duration_since(system_start_time)
+        .unwrap()
+        .to_micros();
+
     // Get data from AD converter
-    if let Err(error) = send_data_to_grafana(stack, &mut rng_wrapper, boot_count, reading).await {
-        error!("Could not send data to Grafana: {error:?}");
+    if let Err(error) = send_metrics(
+        stack,
+        boot_count,
+        bme280_reading,
+        ads1115_reading,
+        run_time_in_micro_seconds,
+        wifi_start_time,
+    )
+    .await
+    {
+        error!("Could not send metrics: {error:?}");
     }
 
     data_sent_sender.send(true).await;

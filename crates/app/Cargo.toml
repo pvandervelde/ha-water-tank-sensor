@@ -37,17 +37,15 @@ static_cell = { version = "2.1.0", default-features = false }
 embedded-io = { version = "0.6.1", default-features = false }
 
 # observability
-log = { version = "0.4.22", default-features = false }
+log = { version = "0.4.26", default-features = false }
 
 # Embassy
-embassy-executor = { version = "0.6", default-features = false, features = [
+embassy-executor = { version = "0.7", default-features = false, features = [
     "task-arena-size-81920",
 ] }
 embassy-sync = { version = "0.6", default-features = false }
-embassy-time = { version = "0.3", default-features = false, features = [
-    "generic-queue",
-] }
-embassy-net = { version = "0.5", default-features = false, features = [
+embassy-time = { version = "0.4", default-features = false }
+embassy-net = { version = "0.6", default-features = false, features = [
     "dhcpv4",
     "dns",
     "tcp",
@@ -57,25 +55,24 @@ embassy-net = { version = "0.5", default-features = false, features = [
 # Hardware Abstraction Layer
 embedded-hal = { version = "1", default-features = false }
 embedded-hal-async = { version = "1", default-features = false }
-embedded-hal-bus = { version = "0.2", default-features = false, features = [
+embedded-hal-bus = { version = "0.3", default-features = false, features = [
     "async",
 ] }
 embedded-io-async = { version = "0.6", default-features = false }
 
 # esp32
-esp-alloc = { version = "0.5.0" }
-esp-backtrace = { version = "0.14.2", features = [
+esp-alloc = "0.6.0"
+esp-backtrace = { version = "0.15.1", features = [
     "esp32c6",
     "exception-handler",
     "panic-handler",
     "println",
 ] }
-esp-hal = { version = "0.22.0", features = ["esp32c6", "log"] }
-esp-hal-embassy = { version = "0.5", features = ["esp32c6", "executors"] }
-esp-println = { version = "0.12.0", features = ["esp32c6"] }
-esp-wifi = { version = "0.11.0", default-features = false, features = [
+esp-hal = { version = "0.23.0", features = ["esp32c6", "log"] }
+esp-hal-embassy = { version = "0.6", features = ["esp32c6", "executors"] }
+esp-println = { version = "0.13.1", features = ["esp32c6"] }
+esp-wifi = { version = "0.12.0", default-features = false, features = [
     "esp32c6",
-    "utils",
     "wifi",
     "esp-alloc",
     "log",
@@ -90,16 +87,17 @@ reqwless = { version = "0.13", default-features = false, features = [
     "embedded-tls",
     "log",
 ] }
-smoltcp = { version = "0.11.0", default-features = false, features = [
+smoltcp = { version = "0.12.0", default-features = false, features = [
     "medium-ethernet",
     "socket-raw",
 ] }
 
 # error handling
-anyhow = { version = "1.0.95", default-features = false }
-thiserror = { version = "2.0.9", default-features = false }
+anyhow = { version = "1.0.96", default-features = false }
+thiserror = { version = "2.0.11", default-features = false }
 
 # Sensor
+ads1x1x = "0.3.0"
 bme280-rs = { version = "0.3", default-features = false, features = [
     "async",
     "uom",
@@ -114,5 +112,8 @@ sntpc = { version = "0.5.2", default-features = false, features = [
 ] }
 
 # Random
-rand_core = { version = "0.6", default-features = false }
+rand_core = { version = "0.9", default-features = false }
 hifitime = { version = "4.0.2", default-features = false }
+float-cmp = "0.10.0"
+libm = "0.2.11"
+nb = "1.1.0"
