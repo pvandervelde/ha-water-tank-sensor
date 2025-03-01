@@ -9,16 +9,14 @@ use esp_hal::i2c::master::Config as I2cConfig;
 use esp_hal::i2c::master::Error as I2cError;
 use esp_hal::i2c::master::I2c;
 use esp_hal::peripherals::I2C0;
-use esp_hal::prelude::nb::block;
-use esp_hal::prelude::*; // RateExtU32, main, ram
 use esp_hal::rng::Rng;
+use esp_hal::time::RateExtU32;
 use esp_hal::Async;
 
 // Components
-use ads1x1x::channel;
 use ads1x1x::ic::{Ads1115, Resolution16Bit};
-use ads1x1x::Ads1x1x;
 use ads1x1x::TargetAddr;
+use ads1x1x::{channel, Ads1x1x};
 
 use bme280_rs::AsyncBme280;
 use bme280_rs::Configuration;
@@ -40,6 +38,7 @@ use embassy_sync::channel::Sender;
 use embassy_time::Delay;
 use embassy_time::Timer;
 
+use nb::block;
 use uom::si::electric_potential::volt;
 use uom::si::f32::ElectricPotential as Voltage;
 use uom::si::f32::Length;
@@ -338,11 +337,15 @@ pub async fn read_sensor_data_task(
     sender: Sender<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
 ) {
     info!("Create I²C bus for the BME280");
-    let i2c_config = I2cConfig {
-        frequency: 25_u32.kHz(),
-        ..Default::default()
+    let i2c_config = I2cConfig::default().with_frequency(25_u32.kHz());
+    let i2c_result = I2c::new(peripherals.i2c0, i2c_config);
+
+    let i2c_blocking = match i2c_result {
+        Ok(r) => r,
+        Err(_) => return,
     };
-    let mut i2c = I2c::new(peripherals.i2c0, i2c_config)
+
+    let mut i2c = i2c_blocking
         .with_sda(peripherals.sda)
         .with_scl(peripherals.scl)
         .into_async();

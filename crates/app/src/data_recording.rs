@@ -7,7 +7,6 @@ use embassy_sync::channel::Sender;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Receiver};
 
 use esp_hal::time::{now, Instant};
-use esp_wifi::wifi;
 use heapless::String;
 
 use log::info;

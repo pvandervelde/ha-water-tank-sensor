@@ -6,8 +6,10 @@
 use core::convert::Infallible;
 
 use embassy_net::Stack;
+use esp_hal::ram;
 use esp_hal::time::now;
 use esp_hal::time::Instant;
+use esp_hal_embassy::main;
 use esp_wifi::wifi::WifiController;
 use log::error;
 use log::info;
@@ -20,6 +22,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::channel::Sender;
 
+use esp_alloc as _;
 use esp_alloc::heap_allocator;
 
 use esp_hal::clock::CpuClock;
@@ -27,10 +30,9 @@ use esp_hal::init as initialize_esp_hal;
 use esp_hal::peripherals::RADIO_CLK;
 use esp_hal::peripherals::TIMG0;
 use esp_hal::peripherals::WIFI;
-use esp_hal::prelude::*; // RateExtU32, main, ram
 use esp_hal::rng::Rng;
+use esp_hal::time::RateExtU32;
 use esp_hal::timer::systimer::SystemTimer;
-use esp_hal::timer::systimer::Target;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::Config as EspConfig;
 
@@ -159,6 +161,19 @@ async fn connect_to_wifi<'a>(
     Ok((guard, stack))
 }
 
+fn init_heap() {
+    static mut HEAP: core::mem::MaybeUninit<[u8; HEAP_MEMORY_SIZE]> =
+        core::mem::MaybeUninit::uninit();
+
+    unsafe {
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+            HEAP.as_mut_ptr() as *mut u8,
+            HEAP_MEMORY_SIZE,
+            esp_alloc::MemoryCapability::Internal.into(),
+        ));
+    }
+}
+
 /// Main task
 #[main]
 async fn main(spawner: Spawner) {
@@ -186,14 +201,14 @@ async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
         config
     });
 
-    heap_allocator!(HEAP_MEMORY_SIZE);
+    init_heap();
 
     let start_time = now();
 
     {
         // main loop
         {
-            let systimer = SystemTimer::new(peripherals.SYSTIMER).split::<Target>();
+            let systimer = SystemTimer::new(peripherals.SYSTIMER);
             initialize_embassy(systimer.alarm0);
 
             let rng = Rng::new(&mut peripherals.RNG);

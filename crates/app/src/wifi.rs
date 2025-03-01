@@ -10,9 +10,6 @@ use embassy_executor::Spawner;
 
 use embassy_net::new as new_network_stack;
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
-
 use esp_wifi::init as initialize_wifi;
 use esp_wifi::wifi::new_with_mode as new_wifi_with_mode;
 use esp_wifi::wifi::wifi_state;
@@ -41,7 +38,6 @@ use esp_hal::peripherals::TIMG0;
 use esp_hal::peripherals::WIFI;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::Blocking;
 
 use heapless::String;
 
@@ -86,7 +82,7 @@ impl From<EspWifiError> for Error {
 /// Connect to WiFi
 pub async fn connect<'a>(
     spawner: Spawner,
-    timg0: TimerGroup<'static, TIMG0, Blocking>,
+    timg0: TimerGroup<TIMG0>,
     rng: Rng,
     wifi: WIFI,
     radio_clock_control: RADIO_CLK,
