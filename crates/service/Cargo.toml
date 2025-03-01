@@ -15,7 +15,7 @@ version = "0.1.0"
 [dependencies]
 anyhow = "1.0.95"
 axum = "0.8.1"
-axum-otel-metrics = "0.9.1"
+axum-otel-metrics = "0.10.0"
 chrono = "0.4.39"
 hifitime = "4.0.2"
 log = "0.4.25"
