@@ -45,7 +45,7 @@ jobs:
       - name: Enable caching
         uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@d2347103f7c028229cc9c9c440e90b572dd50592 # v2
+        uses: taiki-e/install-action@dccf3df6e0d23d1cceb188bbc2255dd0799bcf48 # v2
         with:
           tool: cargo-llvm-cov@0.6.10
       - name: Generate code coverage
