@@ -30,13 +30,12 @@ overflow-checks = false
 # Memory & thread
 critical-section = "1.2.0"
 heapless = { version = "0.8.0", default-features = false }
+nb = "1.1.0"
 scopeguard = { version = "1.2.0", default-features = false }
 static_cell = { version = "2.1.0", default-features = false }
 
 # IO
 embedded-io = { version = "0.6.1", default-features = false }
-
-# observability
 log = { version = "0.4.26", default-features = false }
 
 # Embassy
@@ -105,15 +104,14 @@ bme280-rs = { version = "0.3", default-features = false, features = [
 uom = { version = "0.36", default-features = false, features = ["f32", "si"] }
 
 # Time
+hifitime = { version = "4.0.2", default-features = false }
 time = { version = "0.3", default-features = false }
 sntpc = { version = "0.5.2", default-features = false, features = [
     "embassy-socket",
     "log",
 ] }
 
-# Random
+# Utilities
 rand_core = { version = "0.9", default-features = false }
-hifitime = { version = "4.0.2", default-features = false }
 float-cmp = "0.10.0"
 libm = "0.2.11"
-nb = "1.1.0"

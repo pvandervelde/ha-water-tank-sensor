@@ -6,6 +6,7 @@
 use core::convert::Infallible;
 
 use embassy_net::Stack;
+use esp_hal::peripherals::Peripherals;
 use esp_hal::ram;
 use esp_hal::time::now;
 use esp_hal::time::Instant;
@@ -38,6 +39,7 @@ use esp_hal::Config as EspConfig;
 
 use esp_hal_embassy::init as initialize_embassy;
 
+use logging::HttpLogger;
 use scopeguard::guard;
 use scopeguard::ScopeGuard;
 use thiserror::Error;
@@ -103,6 +105,10 @@ static DATA_SEND_CHANNEL: StaticCell<Channel<NoopRawMutex, bool, 3>> = StaticCel
 /// A channel between the sensors and data processor
 static SENSOR_CHANNEL: StaticCell<Channel<NoopRawMutex, (Bme280Data, Ads1115Data), 3>> =
     StaticCell::new();
+
+/// A channel to provide the Wifi stack to all parts that need one. Note that
+/// Stack instances are 'Copy' so we can send them around to everyone.
+static WIFI_STACK_CHANNEL: StaticCell<Channel<NoopRawMutex, Stack, 1>> = StaticCell::new();
 
 /// Stored boot count between deep sleep cycles
 ///
@@ -177,7 +183,26 @@ fn init_heap() {
 /// Main task
 #[main]
 async fn main(spawner: Spawner) {
-    setup_logging();
+    let mut peripherals = initialize_esp_hal({
+        let mut config = EspConfig::default();
+        config.cpu_clock = CpuClock::max();
+        config
+    });
+
+    let wifi_provider_channel: &'static mut _ = WIFI_STACK_CHANNEL.init(Channel::new());
+    let wifi_receiver = wifi_provider_channel.receiver();
+    let wifi_sender = wifi_provider_channel.sender();
+
+    let logger_ref = setup_logging(spawner, wifi_receiver);
+    if logger_ref.is_err() {
+        // Everything is stuffed. Just go back to sleep
+        enter_deep_sleep(
+            peripherals.LPWR,
+            hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
+        );
+    }
+
+    let logger = logger_ref.unwrap();
 
     // SAFETY:
     // This is the only place where a mutable reference is taken
@@ -188,108 +213,106 @@ async fn main(spawner: Spawner) {
     info!("Current boot count = {boot_count}");
     *boot_count += 1;
 
-    if let Err(error) = main_fallible(spawner, *boot_count).await {
+    if let Err(error) = main_fallible(spawner, peripherals, logger, wifi_sender, *boot_count).await
+    {
         error!("Error while running firmware: {error:?}");
     }
 }
 
 /// Main task that can return an error
-async fn main_fallible(spawner: Spawner, boot_count: u32) -> Result<(), Error> {
-    let mut peripherals = initialize_esp_hal({
-        let mut config = EspConfig::default();
-        config.cpu_clock = CpuClock::max();
-        config
-    });
-
+async fn main_fallible(
+    spawner: Spawner,
+    mut peripherals: Peripherals,
+    logger: &mut HttpLogger,
+    wifi_stack_sender: Sender<'static, NoopRawMutex, Stack<'static>, 1>,
+    boot_count: u32,
+) -> Result<(), Error> {
     init_heap();
 
     let start_time = now();
-
     {
-        // main loop
-        {
-            let systimer = SystemTimer::new(peripherals.SYSTIMER);
-            initialize_embassy(systimer.alarm0);
+        let systimer = SystemTimer::new(peripherals.SYSTIMER);
+        initialize_embassy(systimer.alarm0);
 
-            let rng = Rng::new(&mut peripherals.RNG);
+        let rng = Rng::new(&mut peripherals.RNG);
 
-            let (mut wifi_guard, stack) = connect_to_wifi(
-                spawner,
-                peripherals.TIMG0,
-                peripherals.WIFI,
-                peripherals.RADIO_CLK,
+        let (mut wifi_guard, stack) = connect_to_wifi(
+            spawner,
+            peripherals.TIMG0,
+            peripherals.WIFI,
+            peripherals.RADIO_CLK,
+            rng,
+        )
+        .await?;
+
+        // Get duration for operations
+        let current_time = now();
+        let wifi_start_time_in_micro_seconds = current_time
+            .checked_duration_since(start_time)
+            .unwrap()
+            .to_micros();
+
+        // NETWORK STACK PROVIDER???
+        wifi_stack_sender.send(stack).await;
+        logger.set_network_available(true).unwrap();
+
+        let data_sent_channel: &'static mut _ = DATA_SEND_CHANNEL.init(Channel::new());
+        let data_sent_receiver = data_sent_channel.receiver();
+        let data_sent_sender = data_sent_channel.sender();
+
+        info!("Setup data sending task");
+        let sensor_data_sender = setup_data_transmitting_task(
+            spawner,
+            stack,
+            data_sent_sender,
+            boot_count,
+            start_time,
+            wifi_start_time_in_micro_seconds,
+        )?;
+
+        // Number of samples
+
+        info!("Setup environment sensor task");
+        setup_sensor_task(
+            spawner,
+            SensorPeripherals {
+                sda: peripherals.GPIO10,
+                scl: peripherals.GPIO11,
+                pressure_sensor_enable: peripherals.GPIO18,
+                i2c0: peripherals.I2C0,
                 rng,
-            )
-            .await?;
+            },
+            sensor_data_sender,
+        );
 
-            // Get duration for operations
-            let current_time = now();
-            let wifi_start_time_in_micro_seconds = current_time
-                .checked_duration_since(start_time)
-                .unwrap()
-                .to_micros();
+        info!("Waiting for sensors to complete tasks");
+        let was_processed = data_sent_receiver.receive().await;
+        if !was_processed {
+            error!("Failed to process the data");
+        }
 
-            let data_sent_channel: &'static mut _ = DATA_SEND_CHANNEL.init(Channel::new());
-            let data_sent_receiver = data_sent_channel.receiver();
-            let data_sent_sender = data_sent_channel.sender();
+        info!("Wait for {}s", WAIT_AFTER_SENT_PERIOD_IN_SECONDS);
+        Timer::after(embassy_time::Duration::from_secs(
+            WAIT_AFTER_SENT_PERIOD_IN_SECONDS,
+        ))
+        .await;
 
-            info!("Setup data sending task");
-            let sensor_data_sender = setup_data_transmitting_task(
-                spawner,
-                stack,
-                data_sent_sender,
-                boot_count,
-                start_time,
-                wifi_start_time_in_micro_seconds,
-            )?;
+        // Prepare to shut down. Turn off the logger
+        info!(
+            "Entering deep sleep for {}s",
+            DEEP_SLEEP_DURATION_IN_SECONDS,
+        );
 
-            // Number of samples
+        logger.request_shutdown().await.unwrap();
 
-            info!("Setup environment sensor task");
-            setup_sensor_task(
-                spawner,
-                SensorPeripherals {
-                    sda: peripherals.GPIO10,
-                    scl: peripherals.GPIO11,
-                    pressure_sensor_enable: peripherals.GPIO18,
-                    i2c0: peripherals.I2C0,
-                    rng,
-                },
-                sensor_data_sender,
-            );
-
-            info!("Waiting for sensors to complete tasks");
-            let was_processed = data_sent_receiver.receive().await;
-            if !was_processed {
-                error!("Failed to process the data");
-            }
-
-            info!("Wait for {}s", WAIT_AFTER_SENT_PERIOD_IN_SECONDS);
-            Timer::after(embassy_time::Duration::from_secs(
-                WAIT_AFTER_SENT_PERIOD_IN_SECONDS,
-            ))
-            .await;
-
-            // info!("Saving time to RTC memory ...");
-            // clock.save_to_rtc_memory(hifitime::Duration::from_seconds(
-            //     DEEP_SLEEP_DURATION_IN_SECONDS as f64,
-            // ));
-
-            // If something goes wrong before this point then the guard is dropped which causes
-            // the wifi to disconnect. If that
-            info!("Checking wifi status ...");
-            let connected_result = wifi_guard.is_connected();
-            if connected_result.is_ok() && connected_result.unwrap() {
-                info!("Disconnecting from wifi ...");
-                let _ = wifi_guard.disconnect();
-            }
+        // If something goes wrong before this point then the guard is dropped which causes
+        // the wifi to disconnect. If that
+        let connected_result = wifi_guard.is_connected();
+        if connected_result.is_ok() && connected_result.unwrap() {
+            let _ = wifi_guard.disconnect();
         }
     }
 
-    info!(
-        "Entering deep sleep for {}s",
-        DEEP_SLEEP_DURATION_IN_SECONDS,
-    );
     enter_deep_sleep(
         peripherals.LPWR,
         hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
