@@ -146,7 +146,7 @@ struct ObservabilityConfig {
 }
 
 #[instrument(fields())]
-async fn health_check() -> impl IntoResponse {
+async fn handle_health_check() -> impl IntoResponse {
     info!("Health check request received");
     (
         StatusCode::OK,
@@ -258,7 +258,8 @@ async fn main() -> Result<()> {
     // Create router with routes
     let app = Router::new()
         .route("/api/v1/sensor", post(handle_sensor_data))
-        .route("/health", get(health_check))
+        .route("/api/v1/logs", post(handle_log_data))
+        .route("/health", get(handle_health_check))
         .layer(TraceLayer::new_for_http());
 
     info!("Server starting on port {}", port);

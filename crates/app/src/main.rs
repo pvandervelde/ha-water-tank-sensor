@@ -6,6 +6,8 @@
 use core::convert::Infallible;
 
 use embassy_net::Stack;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use esp_hal::peripherals::Peripherals;
 use esp_hal::ram;
 use esp_hal::time::now;
@@ -24,7 +26,6 @@ use embassy_sync::channel::Channel;
 use embassy_sync::channel::Sender;
 
 use esp_alloc as _;
-use esp_alloc::heap_allocator;
 
 use esp_hal::clock::CpuClock;
 use esp_hal::init as initialize_esp_hal;
@@ -32,14 +33,12 @@ use esp_hal::peripherals::RADIO_CLK;
 use esp_hal::peripherals::TIMG0;
 use esp_hal::peripherals::WIFI;
 use esp_hal::rng::Rng;
-use esp_hal::time::RateExtU32;
 use esp_hal::timer::systimer::SystemTimer;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::Config as EspConfig;
 
 use esp_hal_embassy::init as initialize_embassy;
 
-use logging::HttpLogger;
 use scopeguard::guard;
 use scopeguard::ScopeGuard;
 use thiserror::Error;
@@ -183,7 +182,7 @@ fn init_heap() {
 /// Main task
 #[main]
 async fn main(spawner: Spawner) {
-    let mut peripherals = initialize_esp_hal({
+    let peripherals = initialize_esp_hal({
         let mut config = EspConfig::default();
         config.cpu_clock = CpuClock::max();
         config
@@ -193,16 +192,14 @@ async fn main(spawner: Spawner) {
     let wifi_receiver = wifi_provider_channel.receiver();
     let wifi_sender = wifi_provider_channel.sender();
 
-    let logger_ref = setup_logging(spawner, wifi_receiver);
-    if logger_ref.is_err() {
+    let logger_result = setup_logging(spawner, wifi_receiver);
+    if logger_result.is_err() {
         // Everything is stuffed. Just go back to sleep
         enter_deep_sleep(
             peripherals.LPWR,
             hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
         );
     }
-
-    let logger = logger_ref.unwrap();
 
     // SAFETY:
     // This is the only place where a mutable reference is taken
@@ -213,7 +210,14 @@ async fn main(spawner: Spawner) {
     info!("Current boot count = {boot_count}");
     *boot_count += 1;
 
-    if let Err(error) = main_fallible(spawner, peripherals, logger, wifi_sender, *boot_count).await
+    if let Err(error) = main_fallible(
+        spawner,
+        peripherals,
+        wifi_sender,
+        logger_result.unwrap(),
+        *boot_count,
+    )
+    .await
     {
         error!("Error while running firmware: {error:?}");
     }
@@ -223,8 +227,8 @@ async fn main(spawner: Spawner) {
 async fn main_fallible(
     spawner: Spawner,
     mut peripherals: Peripherals,
-    logger: &mut HttpLogger,
     wifi_stack_sender: Sender<'static, NoopRawMutex, Stack<'static>, 1>,
+    logger_shutdown: &'static Signal<CriticalSectionRawMutex, bool>,
     boot_count: u32,
 ) -> Result<(), Error> {
     init_heap();
@@ -254,7 +258,6 @@ async fn main_fallible(
 
         // NETWORK STACK PROVIDER???
         wifi_stack_sender.send(stack).await;
-        logger.set_network_available(true).unwrap();
 
         let data_sent_channel: &'static mut _ = DATA_SEND_CHANNEL.init(Channel::new());
         let data_sent_receiver = data_sent_channel.receiver();
@@ -303,7 +306,7 @@ async fn main_fallible(
             DEEP_SLEEP_DURATION_IN_SECONDS,
         );
 
-        logger.request_shutdown().await.unwrap();
+        logger_shutdown.signal(true);
 
         // If something goes wrong before this point then the guard is dropped which causes
         // the wifi to disconnect. If that

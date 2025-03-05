@@ -301,7 +301,7 @@ async fn test_health_check() {
     // Initialize tracing for the test
     let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
-    let response = health_check().await.into_response();
+    let response = handle_health_check().await.into_response();
     assert_eq!(response.status(), StatusCode::OK);
 
     // Convert the response body to bytes and then to a string

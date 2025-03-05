@@ -7,10 +7,14 @@ use core::str::FromStr;
 
 use embassy_executor::Spawner;
 use embassy_net::dns::DnsQueryType;
+use embassy_net::dns::DnsSocket;
+use embassy_net::tcp::client::TcpClient;
+use embassy_net::tcp::client::TcpClientState;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::IpEndpoint;
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::channel::Receiver;
 use embassy_sync::channel::Sender;
@@ -19,6 +23,8 @@ use embassy_time::Duration;
 use embassy_time::Timer;
 use heapless::String;
 use heapless::Vec;
+use log::debug;
+use log::error;
 use log::trace;
 use log::Level;
 use log::LevelFilter;
@@ -28,7 +34,10 @@ use log::Record;
 
 use esp_println::println;
 use reqwless::client::HttpClient;
-use reqwless::client::TlsConfig;
+use reqwless::headers::ContentType;
+use reqwless::request::RequestBuilder;
+use serde::Serialize;
+use static_cell::StaticCell;
 use thiserror::Error;
 
 // Constants for buffer sizes
@@ -37,27 +46,28 @@ const MAX_LOG_LENGTH: usize = 256;
 const HTTP_BUFFER_SIZE: usize = 2048;
 
 // HTTP specific constants
-const HTTP_HOST: &str = "logs.example.com";
-const HTTP_PATH: &str = "/api/v1/logs";
-const HTTP_PORT: u16 = 443;
-const USE_TLS: bool = true;
+const LOGGING_URL: &str = env!("LOGGING_URL");
+const LOGGING_URL_SUB_PATH: &str = "/api/v1/logs";
 
 // Create static channels for logger communication
-static LOGGER_COMMAND_CHANNEL: Channel<CriticalSectionRawMutex, LoggerCommand, 4> = Channel::new();
+static LOGGER_SHUT_DOWN_CHANNEL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 static LOGGER_STATUS_SIGNAL: Signal<CriticalSectionRawMutex, LoggerStatus> = Signal::new();
+
+static LOGGER: StaticCell<HttpLogger> = StaticCell::new();
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Failed to serialize the logs.")]
+    FailedToSerializeLogs,
+
     #[error("Failed to set the global logger. No logs will be provided.")]
     FailedToSetLogger,
-}
 
-// Logger command enum for controlling the logger task
-#[derive(Clone, Copy)]
-pub enum LoggerCommand {
-    NetworkAvailable,
-    NetworkUnavailable,
-    Shutdown,
+    #[error("The POST request to send logs resulted in a non-success response code.")]
+    NonSuccessResponseCode,
+
+    #[error("The log sending request failed")]
+    RequestFailed,
 }
 
 // Logger status for reporting back to main task
@@ -69,7 +79,7 @@ pub enum LoggerStatus {
 }
 
 // Log entry structure
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct LogEntry {
     level: Level,
     message: String<MAX_LOG_LENGTH>,
@@ -79,7 +89,7 @@ struct LogEntry {
 // HTTP Logger implementation
 pub struct HttpLogger {
     log_buffer: heapless::Deque<LogEntry, MAX_STORED_LOGS>,
-    command_sender: Option<Sender<'static, CriticalSectionRawMutex, LoggerCommand, 4>>,
+    //command_sender: Option<Sender<'static, CriticalSectionRawMutex, bool, 4>>,
     status_signal: Option<&'static Signal<CriticalSectionRawMutex, LoggerStatus>>,
     current_time_ms: u64,
 }
@@ -88,7 +98,7 @@ impl HttpLogger {
     pub fn new() -> Self {
         Self {
             log_buffer: heapless::Deque::new(),
-            command_sender: None,
+            //command_sender: None,
             status_signal: None,
             current_time_ms: 0,
         }
@@ -97,10 +107,10 @@ impl HttpLogger {
     // Initialize the logger with communication channels
     pub fn init(
         &mut self,
-        command_sender: Sender<'static, CriticalSectionRawMutex, LoggerCommand, 4>,
+        //command_sender: Sender<'static, CriticalSectionRawMutex, bool, 4>,
         status_signal: &'static Signal<CriticalSectionRawMutex, LoggerStatus>,
     ) {
-        self.command_sender = Some(command_sender);
+        //self.command_sender = Some(command_sender);
         self.status_signal = Some(status_signal);
     }
 
@@ -109,43 +119,28 @@ impl HttpLogger {
         self.current_time_ms = current_time_ms;
     }
 
-    // Signal network availability to the logger task
-    pub fn set_network_available(&self, available: bool) -> Result<(), ()> {
-        if let Some(sender) = &self.command_sender {
-            let cmd = if available {
-                LoggerCommand::NetworkAvailable
-            } else {
-                LoggerCommand::NetworkUnavailable
-            };
+    // // Signal shutdown to the logger task
+    // pub async fn request_shutdown(&self) -> Result<(), ()> {
+    //     let result = if let Some(sender) = &self.command_sender {
+    //         sender.try_send(true).map_err(|_| ())
+    //     } else {
+    //         Err(())
+    //     };
 
-            sender.try_send(cmd).map_err(|_| ())
-        } else {
-            Err(())
-        }
-    }
+    //     if result.is_err() {
+    //         return result;
+    //     }
 
-    // Signal shutdown to the logger task
-    pub async fn request_shutdown(&self) -> Result<(), ()> {
-        let result = if let Some(sender) = &self.command_sender {
-            sender.try_send(LoggerCommand::Shutdown).map_err(|_| ())
-        } else {
-            Err(())
-        };
-
-        if result.is_err() {
-            return result;
-        }
-
-        if let Some(signal) = self.status_signal {
-            // Wait until the status is ShutdownComplete
-            while signal.wait().await != LoggerStatus::ShutdownComplete {
-                Timer::after(Duration::from_millis(10)).await;
-            }
-            Ok(())
-        } else {
-            Err(())
-        }
-    }
+    //     if let Some(signal) = self.status_signal {
+    //         // Wait until the status is ShutdownComplete
+    //         while signal.wait().await != LoggerStatus::ShutdownComplete {
+    //             Timer::after(Duration::from_millis(10)).await;
+    //         }
+    //         Ok(())
+    //     } else {
+    //         Err(())
+    //     }
+    // }
 
     // Store a log entry in the buffer
     fn store_log(&mut self, record: &Record) -> Result<(), &'static str> {
@@ -291,47 +286,44 @@ fn increase_retry_interval(interval: &mut u64) {
 
 #[embassy_executor::task]
 pub async fn logger_task(
-    net_stack_provider: Receiver<'static, CriticalSectionRawMutex, Stack<'static>, 1>,
-    command_receiver: Receiver<'static, CriticalSectionRawMutex, LoggerCommand, 4>,
+    net_stack_provider: Receiver<'static, NoopRawMutex, Stack<'static>, 1>,
+    command_receiver: &'static Signal<CriticalSectionRawMutex, bool>,
     status_signal: &'static Signal<CriticalSectionRawMutex, LoggerStatus>,
-    logger: &'static HttpLogger,
-    dns_buffer: &'static mut [u8; N],
 ) {
-    let mut network_available = false;
     let mut shutdown_requested = false;
     let mut temp_log_buffer: Vec<LogEntry, MAX_STORED_LOGS> = Vec::new();
     let mut retry_interval = 10000; // 10 seconds
     let mut last_send_attempt = 0;
+
+    let mut stack: Option<Stack> = None;
 
     // Set initial status
     status_signal.signal(LoggerStatus::Idle);
 
     loop {
         // Check for commands
-        if let Ok(cmd) = command_receiver.try_receive() {
-            match cmd {
-                LoggerCommand::NetworkAvailable => {
-                    network_available = true;
-                    retry_interval = 10000; // Reset retry interval
-                    status_signal.signal(LoggerStatus::Running);
-                }
-                LoggerCommand::NetworkUnavailable => {
-                    network_available = false;
-                    status_signal.signal(LoggerStatus::Idle);
-                }
-                LoggerCommand::Shutdown => {
-                    shutdown_requested = true;
-                    // Try to send any remaining logs before shutting down
-                    if network_available {
-                        status_signal.signal(LoggerStatus::Running);
-                    }
-                }
-            }
-        }
+        shutdown_requested = command_receiver.signaled();
+        //     match cmd {
+        //         LoggerCommand::Shutdown => {
+        //              = true;
+        //             // Try to send any remaining logs before shutting down
+        //             if network_available {
+        //                 status_signal.signal(LoggerStatus::Running);
+        //             }
+        //         }
+        //     }
+        // }
 
-        // If network is available and we have logs to send
-        if network_available {
-            let current_time = embassy_time::Instant::now().as_millis() as u64;
+        if !stack.is_some() {
+            let potential_stack = net_stack_provider.try_receive();
+            if let Ok(net_stack) = potential_stack {
+                stack = Some(net_stack);
+            } else {
+                // Network stack not available
+                status_signal.signal(LoggerStatus::Idle);
+            }
+        } else {
+            let current_time = embassy_time::Instant::now().as_millis();
             let time_since_last_attempt = current_time.saturating_sub(last_send_attempt);
 
             // Take logs from the main buffer if our temp buffer is empty
@@ -345,35 +337,17 @@ pub async fn logger_task(
                 status_signal.signal(LoggerStatus::Running);
                 last_send_attempt = current_time;
 
-                // Try to get network stack
-                let potential_stack = net_stack_provider.try_receive();
-                if let Ok(net_stack) = potential_stack {
-                    // Try to send logs
-                    match send_logs_to_server(
-                        &temp_log_buffer,
-                        net_stack,
-                        HTTP_HOST,
-                        HTTP_PATH,
-                        HTTP_PORT,
-                        USE_TLS,
-                        dns_buffer,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            // Success - clear sent logs
-                            temp_log_buffer.clear();
-                            retry_interval = 10000; // Reset retry interval
-                        }
-                        Err(_) => {
-                            // Failed - increase retry interval
-                            increase_retry_interval(&mut retry_interval);
-                        }
+                // Try to send logs
+                match send_logs_to_server(&temp_log_buffer, stack.unwrap(), LOGGING_URL).await {
+                    Ok(()) => {
+                        // Success - clear sent logs
+                        temp_log_buffer.clear();
+                        retry_interval = 10000; // Reset retry interval
                     }
-                } else {
-                    // Network stack not available
-                    network_available = false;
-                    status_signal.signal(LoggerStatus::Idle);
+                    Err(_) => {
+                        // Failed - increase retry interval
+                        increase_retry_interval(&mut retry_interval);
+                    }
                 }
             } else if temp_log_buffer.is_empty() {
                 // No logs to send, signal idle
@@ -388,7 +362,7 @@ pub async fn logger_task(
         }
 
         // If shutdown is requested but network is not available, just complete shutdown
-        if shutdown_requested && !network_available {
+        if shutdown_requested {
             status_signal.signal(LoggerStatus::ShutdownComplete);
             break;
         }
@@ -399,61 +373,49 @@ pub async fn logger_task(
 }
 
 // Function to send logs via HTTP
-async fn send_logs_to_server<'a>(
-    logs: &[LogEntry],
-    net_stack: Stack<'a>,
-    host: &str,
-    path: &str,
-    port: u16,
-    use_tls: bool,
-    dns_buffer: &mut [u8; N],
-) -> Result<(), &'static str> {
-    // Create HTTP client with TLS if needed
-    let tls_config = if use_tls {
-        Some(TlsConfig::new())
-    } else {
-        None
-    };
+async fn send_logs_to_server(logs: &[LogEntry], stack: Stack<'_>, url: &str) -> Result<(), Error> {
+    let dns_socket = DnsSocket::new(stack);
 
-    let mut client = HttpClient::new(net_stack, dns_buffer, tls_config);
+    let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
+    let tcp_client = TcpClient::new(stack, &tcp_client_state);
 
-    // Build the URL
-    let scheme = if use_tls { "https" } else { "http" };
-    let url = heapless::String::<128>::from_str(&format!("{}://{}:{}{}", scheme, host, port, path))
-        .map_err(|_| "Failed to create URL")?;
+    debug!("Creating HTTP client ...");
+    let mut client = HttpClient::new(&tcp_client, &dns_socket);
 
     // Convert logs to JSON using serde_json_core (heapless)
     let mut json_buffer = [0u8; 2048];
     let logs_slice = if logs.len() > 10 { &logs[0..10] } else { logs }; // Limit batch size
 
+    let mut rx_buf = [0; 4096];
     match serde_json_core::to_slice(logs_slice, &mut json_buffer) {
-        Ok((size, _)) => {
-            // Create and send the request
-            let builder = client
-                .request(Method::POST, url)
-                .await
-                .map_err(|_| "Failed to create request")?
-                .header("Content-Type", "application/json")
-                .map_err(|_| "Failed to set header")?;
+        Ok(size) => {
+            let mut resource = client.resource(url).await.unwrap();
+            let response = resource
+                .post(LOGGING_URL_SUB_PATH)
+                .content_type(ContentType::ApplicationJson)
+                .body(&json_buffer[..size]);
 
-            // Send the request with the JSON body
-            let mut response = builder
-                .body(&json_buffer[..size])
-                .map_err(|_| "Failed to set request body")?
-                .send()
-                .await
-                .map_err(|_| "Failed to send request")?;
+            debug!("Sending request ...");
+            let response = response.send(&mut rx_buf).await;
 
-            // Check response status
-            let status = response.status();
-            if status >= 200 && status < 300 {
-                // Success!
-                Ok(())
-            } else {
-                Err("HTTP request failed with non-2xx status")
+            debug!("Processing response ...");
+            match response {
+                Ok(r) => {
+                    if r.status.is_successful() {
+                        debug!("Sent metrics. Status code: {:?}", r.status);
+                        Ok(())
+                    } else {
+                        error!("Failed to send metrics: Status code {:?}", r.status,);
+                        Err(Error::NonSuccessResponseCode)
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to send metrics: error {:?}", e);
+                    Err(Error::RequestFailed)
+                }
             }
         }
-        Err(_) => Err("Failed to serialize logs to JSON"),
+        Err(_) => Err(Error::FailedToSerializeLogs),
     }
 }
 
@@ -467,24 +429,18 @@ async fn send_logs_to_server<'a>(
 /// <https://github.com/rust-lang/cargo/issues/10358>
 pub fn setup(
     spawner: Spawner,
-    net_stack_provider: Receiver<'static, CriticalSectionRawMutex, Stack<'static>, 1>,
-) -> Result<&'static HttpLogger, Error> {
+    net_stack_provider: Receiver<'static, NoopRawMutex, Stack<'_>, 1>,
+) -> Result<&'static Signal<CriticalSectionRawMutex, bool>, Error> {
     // Create the logger
-    static mut LOGGER: Option<HttpLogger> = None;
 
     // Use an unsafe call so that we can change the static LOGGER item
-    let logger = unsafe {
-        LOGGER = Some(HttpLogger::new());
-        let logger_ref = LOGGER.as_mut().unwrap();
+    let mut internal = HttpLogger::new();
 
-        // Initialize with communication channels
-        logger_ref.init(LOGGER_COMMAND_CHANNEL.sender(), &LOGGER_STATUS_SIGNAL);
-
-        LOGGER.as_ref().unwrap()
-    };
+    // Initialize with communication channels
+    internal.init(&LOGGER_STATUS_SIGNAL);
 
     // Set the logger
-    let logger_set_result = log::set_logger(logger);
+    let logger_set_result = log::set_logger(&internal);
     if logger_set_result.is_err() {
         // Could not set default logger.
         // There is nothing we can do; logging will not work.
@@ -501,19 +457,16 @@ pub fn setup(
 
     trace!("Logger is ready");
 
-    // Buffer for DNS resolution
-    static mut DNS_BUFFER: [u8; 512] = [0; 512];
+    LOGGER.init(internal);
 
     // Spawn logger task
     spawner
         .spawn(logger_task(
             net_stack_provider,
-            LOGGER_COMMAND_CHANNEL.receiver(),
+            &LOGGER_SHUT_DOWN_CHANNEL,
             &LOGGER_STATUS_SIGNAL,
-            logger,
-            unsafe { &mut DNS_BUFFER },
         ))
         .unwrap();
 
-    Ok(logger)
+    Ok(&LOGGER_SHUT_DOWN_CHANNEL)
 }

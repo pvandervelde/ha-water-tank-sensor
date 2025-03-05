@@ -36,7 +36,7 @@ static_cell = { version = "2.1.0", default-features = false }
 
 # IO
 embedded-io = { version = "0.6.1", default-features = false }
-log = { version = "0.4.26", default-features = false }
+log = { version = "0.4.26", default-features = false, features = ["serde"] }
 
 # Embassy
 embassy-executor = { version = "0.7", default-features = false, features = [
@@ -110,6 +110,10 @@ sntpc = { version = "0.5.2", default-features = false, features = [
     "embassy-socket",
     "log",
 ] }
+
+# Serialization
+serde-json-core = "0.6.0"
+serde = { version = "1.0.218", default-features = false, features = ["derive"] }
 
 # Utilities
 rand_core = { version = "0.9", default-features = false }
