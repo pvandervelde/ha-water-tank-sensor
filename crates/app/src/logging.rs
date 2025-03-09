@@ -2,9 +2,14 @@
 
 //! Functions for setting up the logging system
 
+use core::cell::RefCell;
 use core::fmt::Write;
 use core::str::FromStr;
 
+#[cfg(target_has_atomic = "ptr")]
+use alloc::sync::Arc;
+
+use critical_section::Mutex;
 use embassy_executor::Spawner;
 use embassy_net::dns::DnsQueryType;
 use embassy_net::dns::DnsSocket;
@@ -18,6 +23,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::channel::Receiver;
 use embassy_sync::channel::Sender;
+use embassy_sync::lazy_lock::LazyLock;
 use embassy_sync::signal::Signal;
 use embassy_time::Duration;
 use embassy_time::Timer;
@@ -37,7 +43,6 @@ use reqwless::client::HttpClient;
 use reqwless::headers::ContentType;
 use reqwless::request::RequestBuilder;
 use serde::Serialize;
-use static_cell::StaticCell;
 use thiserror::Error;
 
 // Constants for buffer sizes
@@ -50,13 +55,21 @@ const LOGGING_URL: &str = env!("LOGGING_URL");
 const LOGGING_URL_SUB_PATH: &str = "/api/v1/logs";
 
 // Create static channels for logger communication
-static LOGGER_SHUT_DOWN_CHANNEL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
+static LOGGER_SHUT_DOWN_REQUESTED_CHANNEL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
+static LOGGER_SHUT_DOWN_COMPLETE_CHANNEL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 static LOGGER_STATUS_SIGNAL: Signal<CriticalSectionRawMutex, LoggerStatus> = Signal::new();
 
-static LOGGER: StaticCell<HttpLogger> = StaticCell::new();
+static LOGGER: LazyLock<HttpLogger> = LazyLock::new(|| HttpLogger::new(&LOGGER_STATUS_SIGNAL));
+
+// Create a static mutex-protected log buffer
+static LOG_BUFFER: Mutex<RefCell<heapless::Deque<LogEntry, MAX_STORED_LOGS>>> =
+    Mutex::new(RefCell::new(heapless::Deque::new()));
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Failed to push log to the buffer")]
+    FailedToPushLogToBuffer,
+
     #[error("Failed to serialize the logs.")]
     FailedToSerializeLogs,
 
@@ -88,30 +101,16 @@ struct LogEntry {
 
 // HTTP Logger implementation
 pub struct HttpLogger {
-    log_buffer: heapless::Deque<LogEntry, MAX_STORED_LOGS>,
-    //command_sender: Option<Sender<'static, CriticalSectionRawMutex, bool, 4>>,
     status_signal: Option<&'static Signal<CriticalSectionRawMutex, LoggerStatus>>,
     current_time_ms: u64,
 }
 
 impl HttpLogger {
-    pub fn new() -> Self {
+    pub fn new(status_signal: &'static Signal<CriticalSectionRawMutex, LoggerStatus>) -> Self {
         Self {
-            log_buffer: heapless::Deque::new(),
-            //command_sender: None,
-            status_signal: None,
+            status_signal: Some(status_signal),
             current_time_ms: 0,
         }
-    }
-
-    // Initialize the logger with communication channels
-    pub fn init(
-        &mut self,
-        //command_sender: Sender<'static, CriticalSectionRawMutex, bool, 4>,
-        status_signal: &'static Signal<CriticalSectionRawMutex, LoggerStatus>,
-    ) {
-        //self.command_sender = Some(command_sender);
-        self.status_signal = Some(status_signal);
     }
 
     // Call this regularly to update the internal timestamp
@@ -119,31 +118,8 @@ impl HttpLogger {
         self.current_time_ms = current_time_ms;
     }
 
-    // // Signal shutdown to the logger task
-    // pub async fn request_shutdown(&self) -> Result<(), ()> {
-    //     let result = if let Some(sender) = &self.command_sender {
-    //         sender.try_send(true).map_err(|_| ())
-    //     } else {
-    //         Err(())
-    //     };
-
-    //     if result.is_err() {
-    //         return result;
-    //     }
-
-    //     if let Some(signal) = self.status_signal {
-    //         // Wait until the status is ShutdownComplete
-    //         while signal.wait().await != LoggerStatus::ShutdownComplete {
-    //             Timer::after(Duration::from_millis(10)).await;
-    //         }
-    //         Ok(())
-    //     } else {
-    //         Err(())
-    //     }
-    // }
-
     // Store a log entry in the buffer
-    fn store_log(&mut self, record: &Record) -> Result<(), &'static str> {
+    fn store_log(&self, record: &Record) -> Result<(), Error> {
         let level = record.level();
 
         // Format the log message
@@ -157,45 +133,34 @@ impl HttpLogger {
             timestamp: self.current_time_ms,
         };
 
-        // Try to store the log, removing oldest entry if full
-        if self.log_buffer.is_full() {
-            let _ = self.log_buffer.pop_front();
-        }
-
-        if self.log_buffer.push_back(entry).is_err() {
-            return Err("Failed to store log entry");
-        }
-
-        Ok(())
-    }
-
-    // Take logs from the buffer, returns number of logs taken
-    pub fn take_logs(
-        &mut self,
-        dest: &mut Vec<LogEntry, MAX_STORED_LOGS>,
-        max_count: usize,
-    ) -> usize {
-        let mut count = 0;
-
-        while count < max_count && !self.log_buffer.is_empty() {
-            if let Some(entry) = self.log_buffer.pop_front() {
-                if dest.push(entry.clone()).is_err() {
-                    // If dest is full, put the entry back and stop
-                    let _ = self.log_buffer.push_front(entry);
-                    break;
-                }
-                count += 1;
+        // Get mutable access to the buffer through the mutex
+        critical_section::with(|cs| {
+            let mut buffer = LOG_BUFFER.borrow_ref_mut(cs);
+            // Try to store the log, removing oldest entry if full
+            if buffer.is_full() {
+                let _ = buffer.pop_front();
             }
-        }
 
-        count
+            if buffer.push_back(entry).is_err() {
+                return Err(Error::FailedToPushLogToBuffer);
+            }
+
+            Ok(())
+        })
     }
 }
 
 // Implement the Log trait for HttpLogger
 impl Log for HttpLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Info
+        /// Log level from environment
+        const LEVEL: Option<&'static str> = option_env!("ESP_LOG");
+        
+        let max_level = LEVEL
+            .map(|level| Level::from_str(level).unwrap_or(Level::Info))
+            .unwrap_or(Level::Info);
+
+        metadata.level() <= max_level
     }
 
     fn log(&self, record: &Record) {
@@ -223,13 +188,10 @@ impl Log for HttpLogger {
         };
 
         if self.enabled(record.metadata()) {
-            // Create a mutable reference to self
-            // This is unsafe but necessary due to the Log trait API design
-            let this = unsafe { &mut *(self as *const Self as *mut Self) };
-
             // Store the log entry
-            let _ = this.store_log(record);
+            let _ = self.store_log(record);
 
+            // Print to console with colors
             println!(
                 "{}{:>5} {}{}{}{}]{} {}",
                 color,
@@ -287,7 +249,8 @@ fn increase_retry_interval(interval: &mut u64) {
 #[embassy_executor::task]
 pub async fn logger_task(
     net_stack_provider: Receiver<'static, NoopRawMutex, Stack<'static>, 1>,
-    command_receiver: &'static Signal<CriticalSectionRawMutex, bool>,
+    shut_down_requested_signal: &'static Signal<CriticalSectionRawMutex, bool>,
+    shut_down_complete_signal: &'static Signal<CriticalSectionRawMutex, bool>,
     status_signal: &'static Signal<CriticalSectionRawMutex, LoggerStatus>,
 ) {
     let mut shutdown_requested = false;
@@ -301,25 +264,13 @@ pub async fn logger_task(
     status_signal.signal(LoggerStatus::Idle);
 
     loop {
-        // Check for commands
-        shutdown_requested = command_receiver.signaled();
-        //     match cmd {
-        //         LoggerCommand::Shutdown => {
-        //              = true;
-        //             // Try to send any remaining logs before shutting down
-        //             if network_available {
-        //                 status_signal.signal(LoggerStatus::Running);
-        //             }
-        //         }
-        //     }
-        // }
+        shutdown_requested = shut_down_requested_signal.signaled();
 
         if !stack.is_some() {
             let potential_stack = net_stack_provider.try_receive();
             if let Ok(net_stack) = potential_stack {
                 stack = Some(net_stack);
             } else {
-                // Network stack not available
                 status_signal.signal(LoggerStatus::Idle);
             }
         } else {
@@ -328,8 +279,14 @@ pub async fn logger_task(
 
             // Take logs from the main buffer if our temp buffer is empty
             if temp_log_buffer.is_empty() {
-                let this = unsafe { &mut *(logger as *const HttpLogger as *mut HttpLogger) };
-                let _ = this.take_logs(&mut temp_log_buffer, MAX_STORED_LOGS);
+                critical_section::with(|cs| {
+                    let mut buffer = LOG_BUFFER.borrow_ref_mut(cs);
+                    while !buffer.is_empty() && !temp_log_buffer.is_full() {
+                        if let Some(entry) = buffer.pop_front() {
+                            let _ = temp_log_buffer.push(entry);
+                        }
+                    }
+                });
             }
 
             // If we have logs to send and enough time has passed
@@ -370,6 +327,8 @@ pub async fn logger_task(
         // Wait a bit before checking again
         Timer::after(Duration::from_millis(100)).await;
     }
+
+    shut_down_complete_signal.signal(true);
 }
 
 // Function to send logs via HTTP
@@ -431,19 +390,11 @@ pub fn setup(
     spawner: Spawner,
     net_stack_provider: Receiver<'static, NoopRawMutex, Stack<'_>, 1>,
 ) -> Result<&'static Signal<CriticalSectionRawMutex, bool>, Error> {
-    // Create the logger
-
-    // Use an unsafe call so that we can change the static LOGGER item
-    let mut internal = HttpLogger::new();
-
-    // Initialize with communication channels
-    internal.init(&LOGGER_STATUS_SIGNAL);
+    // Initialize the static buffer
 
     // Set the logger
-    let logger_set_result = log::set_logger(&internal);
+    let logger_set_result = log::set_logger(LOGGER.get());
     if logger_set_result.is_err() {
-        // Could not set default logger.
-        // There is nothing we can do; logging will not work.
         return Err(Error::FailedToSetLogger);
     }
 
@@ -457,16 +408,15 @@ pub fn setup(
 
     trace!("Logger is ready");
 
-    LOGGER.init(internal);
-
     // Spawn logger task
     spawner
         .spawn(logger_task(
             net_stack_provider,
-            &LOGGER_SHUT_DOWN_CHANNEL,
+            &LOGGER_SHUT_DOWN_REQUESTED_CHANNEL,
+            &LOGGER_SHUT_DOWN_COMPLETE_CHANNEL,
             &LOGGER_STATUS_SIGNAL,
         ))
         .unwrap();
 
-    Ok(&LOGGER_SHUT_DOWN_CHANNEL)
+    Ok(&LOGGER_SHUT_DOWN_REQUESTED_CHANNEL)
 }

@@ -3,10 +3,7 @@ use chrono::Utc;
 
 // REST
 use axum::{
-    http::StatusCode,
-    response::IntoResponse,
-    routing::{get, post},
-    Json, Router,
+    extract::State, http::StatusCode, response::IntoResponse, routing::{get, post}, Json, Router 
 };
 
 use once_cell::sync::Lazy;
@@ -138,6 +135,29 @@ impl ApiResponse {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct LogData {
+    device_id: String,
+    boot_count: u32,
+    ticks: f64,
+    level: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DeviceTimingData {
+    device_id: String,
+    boot_count: u32,
+    ticks: f64,
+}
+
+#[derive(Debug, Clone)]
+struct DeviceTimeMapping {
+    boot_count: u32,
+    first_tick: f64,
+    first_timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone)]
 struct ObservabilityConfig {
     metrics_push_url: String,
@@ -145,20 +165,24 @@ struct ObservabilityConfig {
     logs_push_url: String,
 }
 
-#[instrument(fields())]
-async fn handle_health_check() -> impl IntoResponse {
-    info!("Health check request received");
-    (
-        StatusCode::OK,
-        Json(ApiResponse::success("Service is healthy")),
-    )
+#[derive(Clone)]
+struct AppState {
+    device_time_mappings: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, DeviceTimeMapping>>>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            device_time_mappings: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        }
+    }
 }
 
 #[instrument(fields(device_id = %sensor_data.device_id))]
 async fn handle_sensor_data(
     Json(sensor_data): Json<SensorData>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse>)> {
-    // Validate sensor data
+    info!("Sensor data received. Processing ...");
     if let Err(e) = sensor_data.validate() {
         error!(error = %e, "Invalid sensor data received");
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
@@ -190,6 +214,137 @@ async fn handle_sensor_data(
     ))
 }
 
+#[instrument(fields(device_id = %log_data.device_id), skip(state))]
+async fn handle_log_data(
+    State(state): State<AppState>,
+    Json(log_data): Json<LogData>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse>)> {
+    info!("Log data received. Processing ...");
+    
+    // Validate log level
+    let level = match log_data.level.to_lowercase().as_str() {
+        "error" | "warn" | "info" | "debug" | "trace" => log_data.level.to_lowercase(),
+        _ => {
+            error!("Invalid log level received: {}", log_data.level);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Invalid log level")),
+            ));
+        }
+    };
+
+    // Calculate real timestamp using device mapping
+    let timestamp = {
+        let mappings = state.device_time_mappings.read().await;
+        if let Some(mapping) = mappings.get(&log_data.device_id) {
+            if mapping.boot_count == log_data.boot_count {
+                let tick_diff = log_data.ticks - mapping.first_tick;
+                let duration = chrono::Duration::milliseconds((tick_diff * 1000.0) as i64);
+                Some(mapping.first_timestamp + duration)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let timestamp_str = timestamp
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+    // Log the message using tracing with the appropriate level
+    match level.as_str() {
+        "error" => error!(
+            device_id = %log_data.device_id,
+            boot_count = %log_data.boot_count,
+            device_ticks = %log_data.ticks,
+            timestamp = %timestamp_str,
+            message = %log_data.message,
+            "Device log"
+        ),
+        "warn" => tracing::warn!(
+            device_id = %log_data.device_id,
+            boot_count = %log_data.boot_count,
+            device_ticks = %log_data.ticks,
+            timestamp = %timestamp_str,
+            message = %log_data.message,
+            "Device log"
+        ),
+        "info" => info!(
+            device_id = %log_data.device_id,
+            boot_count = %log_data.boot_count,
+            device_ticks = %log_data.ticks,
+            timestamp = %timestamp_str,
+            message = %log_data.message,
+            "Device log"
+        ),
+        "debug" => debug!(
+            device_id = %log_data.device_id,
+            boot_count = %log_data.boot_count,
+            device_ticks = %log_data.ticks,
+            timestamp = %timestamp_str,
+            message = %log_data.message,
+            "Device log"
+        ),
+        _ => tracing::trace!(
+            device_id = %log_data.device_id,
+            boot_count = %log_data.boot_count,
+            device_ticks = %log_data.ticks,
+            timestamp = %timestamp_str,
+            message = %log_data.message,
+            "Device log"
+        ),
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::success("Log message processed successfully")),
+    ))
+}
+
+#[instrument(fields(device_id = %timing_data.device_id), skip(state))]
+async fn handle_device_timing(
+    State(state): State<AppState>,
+    Json(timing_data): Json<DeviceTimingData>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse>)> {
+    info!("Device timing data received. Processing ...");
+    
+    // Update device time mapping
+    let mut mappings = state.device_time_mappings.write().await;
+    
+    // Always create new mapping as this is the first contact after WiFi connection
+    mappings.insert(
+        timing_data.device_id.clone(),
+        DeviceTimeMapping {
+            boot_count: timing_data.boot_count,
+            first_tick: timing_data.ticks,
+            first_timestamp: Utc::now(),
+        },
+    );
+
+    info!(
+        device_id = %timing_data.device_id,
+        boot_count = %timing_data.boot_count,
+        ticks = %timing_data.ticks,
+        "Device timing data received"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::success("Device timing data processed successfully")),
+    ))
+}
+
+#[instrument(fields())]
+async fn handle_health_check() -> impl IntoResponse {
+    info!("Health check request received");
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success("Service is healthy")),
+    )
+}
+ 
 fn init_logs(
     config: &ObservabilityConfig,
 ) -> Result<opentelemetry_sdk::logs::LoggerProvider, LogError> {
@@ -233,47 +388,6 @@ fn init_traces(config: &ObservabilityConfig) -> Result<sdktrace::TracerProvider,
         .with_resource(RESOURCE.clone())
         .with_batch_exporter(exporter, runtime::Tokio)
         .build())
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let port = std::env::var("PORT")
-        .unwrap_or_else(|_| "8080".to_string())
-        .parse::<u16>()
-        .expect("PORT must be a valid port number");
-
-    let config = ObservabilityConfig {
-        metrics_push_url: std::env::var("METRICS_PUSH_URL")
-            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
-        trace_push_url: std::env::var("TRACING_PUSH_URL")
-            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
-        logs_push_url: std::env::var("LOGS_PUSH_URL")
-            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
-    };
-
-    // Initialize telemetry
-    let (logs, metrics, tracing) = setup_telemetry(&config)?;
-    info!("Telemetry initialized");
-
-    // Create router with routes
-    let app = Router::new()
-        .route("/api/v1/sensor", post(handle_sensor_data))
-        .route("/api/v1/logs", post(handle_log_data))
-        .route("/health", get(handle_health_check))
-        .layer(TraceLayer::new_for_http());
-
-    info!("Server starting on port {}", port);
-
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
-        .await
-        .unwrap();
-    axum::serve(listener, app).await?;
-
-    tracing.shutdown()?;
-    metrics.shutdown()?;
-    logs.shutdown()?;
-
-    Ok(())
 }
 
 fn record_gauge<T: Into<f64>>(
@@ -422,4 +536,50 @@ fn setup_telemetry(
     global::set_meter_provider(meter_provider.clone());
 
     Ok((logger_provider, meter_provider, tracer_provider))
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let port = std::env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse::<u16>()
+        .expect("PORT must be a valid port number");
+
+    let config = ObservabilityConfig {
+        metrics_push_url: std::env::var("METRICS_PUSH_URL")
+            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
+        trace_push_url: std::env::var("TRACING_PUSH_URL")
+            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
+        logs_push_url: std::env::var("LOGS_PUSH_URL")
+            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
+    };
+
+    // Initialize telemetry
+    let (logs, metrics, tracing) = setup_telemetry(&config)?;
+    info!("Telemetry initialized");
+
+    // Create app state
+    let state = AppState::new();
+
+    // Create router with routes
+    let app = Router::new()
+        .route("/api/v1/sensor", post(handle_sensor_data))
+        .route("/api/v1/timing", post(handle_device_timing))
+        .route("/api/v1/logs", post(handle_log_data))
+        .route("/health", get(handle_health_check))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+
+    info!("Server starting on port {}", port);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+        .await
+        .unwrap();
+    axum::serve(listener, app).await?;
+
+    tracing.shutdown()?;
+    metrics.shutdown()?;
+    logs.shutdown()?;
+
+    Ok(())
 }

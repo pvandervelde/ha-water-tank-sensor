@@ -3,6 +3,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::convert::Infallible;
 
 use embassy_net::Stack;
@@ -78,6 +80,9 @@ use sensor_data::{Ads1115Data, Bme280Data};
 
 mod sleep;
 use self::sleep::enter_deep as enter_deep_sleep;
+
+mod timing;
+use self::timing::send_timing_data;
 
 mod wifi;
 use self::wifi::Error as WifiError;
@@ -255,6 +260,11 @@ async fn main_fallible(
             .checked_duration_since(start_time)
             .unwrap()
             .to_micros();
+
+        if let Err(e) = send_timing_data(stack, boot_count).await {
+            error!("Failed to send timing data: {e:?}");
+            // Continue execution even if timing data fails, as we can still try to send sensor data
+        }
 
         // NETWORK STACK PROVIDER???
         wifi_stack_sender.send(stack).await;

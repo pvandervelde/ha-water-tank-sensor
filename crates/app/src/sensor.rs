@@ -484,7 +484,7 @@ async fn wait_for_pressure_sensor_voltage_to_stabilize(
         debug!("Pressure sensor voltage: {:.2} V", pressure_sensor_voltage);
 
         let diff = fabsf(EXPECTED_PRESSURE_SENSOR_VOLTAGE - pressure_sensor_voltage);
-        if diff < 0.2 {
+        if diff < 0.5 {
             stable_count += 1;
         } else {
             stable_count = 0;
