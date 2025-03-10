@@ -3,6 +3,7 @@
 //! Functions for setting up the logging system
 
 use core::cell::RefCell;
+use core::fmt;
 use core::fmt::Write;
 use core::str::FromStr;
 
@@ -11,11 +12,9 @@ use alloc::sync::Arc;
 
 use critical_section::Mutex;
 use embassy_executor::Spawner;
-use embassy_net::dns::DnsQueryType;
 use embassy_net::dns::DnsSocket;
 use embassy_net::tcp::client::TcpClient;
 use embassy_net::tcp::client::TcpClientState;
-use embassy_net::tcp::TcpSocket;
 use embassy_net::IpEndpoint;
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -27,11 +26,10 @@ use embassy_sync::lazy_lock::LazyLock;
 use embassy_sync::signal::Signal;
 use embassy_time::Duration;
 use embassy_time::Timer;
+use esp_hal::time::now;
 use heapless::String;
 use heapless::Vec;
-use log::debug;
 use log::error;
-use log::trace;
 use log::Level;
 use log::LevelFilter;
 use log::Log;
@@ -57,9 +55,8 @@ const LOGGING_URL_SUB_PATH: &str = "/api/v1/logs";
 // Create static channels for logger communication
 static LOGGER_SHUT_DOWN_REQUESTED_CHANNEL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 static LOGGER_SHUT_DOWN_COMPLETE_CHANNEL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
-static LOGGER_STATUS_SIGNAL: Signal<CriticalSectionRawMutex, LoggerStatus> = Signal::new();
 
-static LOGGER: LazyLock<HttpLogger> = LazyLock::new(|| HttpLogger::new(&LOGGER_STATUS_SIGNAL));
+static LOGGER: LazyLock<HttpLogger> = LazyLock::new(|| HttpLogger::new());
 
 // Create a static mutex-protected log buffer
 static LOG_BUFFER: Mutex<RefCell<heapless::Deque<LogEntry, MAX_STORED_LOGS>>> =
@@ -83,14 +80,6 @@ pub enum Error {
     RequestFailed,
 }
 
-// Logger status for reporting back to main task
-#[derive(Clone, Copy, PartialEq)]
-pub enum LoggerStatus {
-    Running,
-    Idle,
-    ShutdownComplete,
-}
-
 // Log entry structure
 #[derive(Clone, Serialize)]
 struct LogEntry {
@@ -100,22 +89,11 @@ struct LogEntry {
 }
 
 // HTTP Logger implementation
-pub struct HttpLogger {
-    status_signal: Option<&'static Signal<CriticalSectionRawMutex, LoggerStatus>>,
-    current_time_ms: u64,
-}
+pub struct HttpLogger {}
 
 impl HttpLogger {
-    pub fn new(status_signal: &'static Signal<CriticalSectionRawMutex, LoggerStatus>) -> Self {
-        Self {
-            status_signal: Some(status_signal),
-            current_time_ms: 0,
-        }
-    }
-
-    // Call this regularly to update the internal timestamp
-    pub fn update_time(&mut self, current_time_ms: u64) {
-        self.current_time_ms = current_time_ms;
+    pub fn new() -> Self {
+        Self {}
     }
 
     // Store a log entry in the buffer
@@ -130,7 +108,7 @@ impl HttpLogger {
         let entry = LogEntry {
             level,
             message,
-            timestamp: self.current_time_ms,
+            timestamp: now().ticks(),
         };
 
         // Get mutable access to the buffer through the mutex
@@ -155,7 +133,7 @@ impl Log for HttpLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         /// Log level from environment
         const LEVEL: Option<&'static str> = option_env!("ESP_LOG");
-        
+
         let max_level = LEVEL
             .map(|level| Level::from_str(level).unwrap_or(Level::Info))
             .unwrap_or(Level::Info);
@@ -164,45 +142,11 @@ impl Log for HttpLogger {
     }
 
     fn log(&self, record: &Record) {
-        /// Modifier for restoring normal text style
-        const RESET: &str = "\u{001B}[0m";
-        /// Modifier for setting gray text
-        const GRAY: &str = "\u{001B}[2m";
-        /// Modifier for setting red text
-        const RED: &str = "\u{001B}[31m";
-        /// Modifier for setting green text
-        const GREEN: &str = "\u{001B}[32m";
-        /// Modifier for setting yellow text
-        const YELLOW: &str = "\u{001B}[33m";
-        /// Modifier for setting blue text
-        const BLUE: &str = "\u{001B}[34m";
-        /// Modifier for setting cyan text
-        const CYAN: &str = "\u{001B}[35m";
-
-        let color = match record.level() {
-            Level::Error => RED,
-            Level::Warn => YELLOW,
-            Level::Info => GREEN,
-            Level::Debug => BLUE,
-            Level::Trace => CYAN,
-        };
-
         if self.enabled(record.metadata()) {
             // Store the log entry
             let _ = self.store_log(record);
 
-            // Print to console with colors
-            println!(
-                "{}{:>5} {}{}{}{}]{} {}",
-                color,
-                record.level(),
-                RESET,
-                GRAY,
-                record.target(),
-                GRAY,
-                RESET,
-                record.args()
-            );
+            log_to_console(record.level(), record.target(), record.args());
         }
     }
 
@@ -212,38 +156,41 @@ impl Log for HttpLogger {
     }
 }
 
-// Escape JSON string (simple implementation)
-fn escape_json(s: &str) -> String<512> {
-    let mut result = String::new();
-    for c in s.chars() {
-        match c {
-            '"' => {
-                let _ = result.push_str("\\\"");
-            }
-            '\\' => {
-                let _ = result.push_str("\\\\");
-            }
-            '\n' => {
-                let _ = result.push_str("\\n");
-            }
-            '\r' => {
-                let _ = result.push_str("\\r");
-            }
-            '\t' => {
-                let _ = result.push_str("\\t");
-            }
-            _ => {
-                let _ = result.push(c);
-            }
-        }
-    }
-    result
-}
-
 // Increase retry interval with exponential backoff
 fn increase_retry_interval(interval: &mut u64) {
     const MAX_RETRY_INTERVAL: u64 = 600000; // 10 minutes
     *interval = (*interval * 2).min(MAX_RETRY_INTERVAL);
+}
+
+fn log_to_console(level: Level, target: &str, args: &fmt::Arguments) {
+    /// Modifier for restoring normal text style
+    const RESET: &str = "\u{001B}[0m";
+    /// Modifier for setting gray text
+    const GRAY: &str = "\u{001B}[2m";
+    /// Modifier for setting red text
+    const RED: &str = "\u{001B}[31m";
+    /// Modifier for setting green text
+    const GREEN: &str = "\u{001B}[32m";
+    /// Modifier for setting yellow text
+    const YELLOW: &str = "\u{001B}[33m";
+    /// Modifier for setting blue text
+    const BLUE: &str = "\u{001B}[34m";
+    /// Modifier for setting cyan text
+    const CYAN: &str = "\u{001B}[35m";
+
+    let color = match level {
+        Level::Error => RED,
+        Level::Warn => YELLOW,
+        Level::Info => GREEN,
+        Level::Debug => BLUE,
+        Level::Trace => CYAN,
+    };
+
+    // Print to console with colors
+    println!(
+        "{}{:>5} {}{}{}{}]{} {}",
+        color, level, RESET, GRAY, target, GRAY, RESET, args
+    );
 }
 
 #[embassy_executor::task]
@@ -251,7 +198,6 @@ pub async fn logger_task(
     net_stack_provider: Receiver<'static, NoopRawMutex, Stack<'static>, 1>,
     shut_down_requested_signal: &'static Signal<CriticalSectionRawMutex, bool>,
     shut_down_complete_signal: &'static Signal<CriticalSectionRawMutex, bool>,
-    status_signal: &'static Signal<CriticalSectionRawMutex, LoggerStatus>,
 ) {
     let mut shutdown_requested = false;
     let mut temp_log_buffer: Vec<LogEntry, MAX_STORED_LOGS> = Vec::new();
@@ -260,18 +206,29 @@ pub async fn logger_task(
 
     let mut stack: Option<Stack> = None;
 
-    // Set initial status
-    status_signal.signal(LoggerStatus::Idle);
-
+    log_to_console(
+        Level::Debug,
+        "tank_sensor_level_embedded::logging::logger_task",
+        &format_args!("Starting logging sending loop ..."),
+    );
     loop {
         shutdown_requested = shut_down_requested_signal.signaled();
 
-        if !stack.is_some() {
+        if stack.is_none() {
             let potential_stack = net_stack_provider.try_receive();
             if let Ok(net_stack) = potential_stack {
+                log_to_console(
+                    Level::Debug,
+                    "tank_sensor_level_embedded::logging::logger_task",
+                    &format_args!("Network stack obtained. Starting log sending ..."),
+                );
                 stack = Some(net_stack);
             } else {
-                status_signal.signal(LoggerStatus::Idle);
+                log_to_console(
+                    Level::Debug,
+                    "tank_sensor_level_embedded::logging::logger_task",
+                    &format_args!("No network stack found. Unable to send logs ..."),
+                );
             }
         } else {
             let current_time = embassy_time::Instant::now().as_millis();
@@ -279,6 +236,11 @@ pub async fn logger_task(
 
             // Take logs from the main buffer if our temp buffer is empty
             if temp_log_buffer.is_empty() {
+                log_to_console(
+                    Level::Debug,
+                    "tank_sensor_level_embedded::logging::logger_task",
+                    &format_args!("Attempting to push logs to buffer ..."),
+                );
                 critical_section::with(|cs| {
                     let mut buffer = LOG_BUFFER.borrow_ref_mut(cs);
                     while !buffer.is_empty() && !temp_log_buffer.is_full() {
@@ -291,10 +253,14 @@ pub async fn logger_task(
 
             // If we have logs to send and enough time has passed
             if !temp_log_buffer.is_empty() && time_since_last_attempt >= retry_interval {
-                status_signal.signal(LoggerStatus::Running);
                 last_send_attempt = current_time;
 
                 // Try to send logs
+                log_to_console(
+                    Level::Debug,
+                    "tank_sensor_level_embedded::logging::logger_task",
+                    &format_args!("Sending logs to server ..."),
+                );
                 match send_logs_to_server(&temp_log_buffer, stack.unwrap(), LOGGING_URL).await {
                     Ok(()) => {
                         // Success - clear sent logs
@@ -308,11 +274,14 @@ pub async fn logger_task(
                 }
             } else if temp_log_buffer.is_empty() {
                 // No logs to send, signal idle
-                status_signal.signal(LoggerStatus::Idle);
+                log_to_console(
+                    Level::Debug,
+                    "tank_sensor_level_embedded::logging::logger_task",
+                    &format_args!("No logs to send ..."),
+                );
 
                 // If shutdown is requested and we've sent all logs, complete shutdown
                 if shutdown_requested {
-                    status_signal.signal(LoggerStatus::ShutdownComplete);
                     break;
                 }
             }
@@ -320,13 +289,23 @@ pub async fn logger_task(
 
         // If shutdown is requested but network is not available, just complete shutdown
         if shutdown_requested {
-            status_signal.signal(LoggerStatus::ShutdownComplete);
+            log_to_console(
+                Level::Debug,
+                "tank_sensor_level_embedded::logging::logger_task",
+                &format_args!("Shutting down logger loop ..."),
+            );
             break;
         }
 
         // Wait a bit before checking again
         Timer::after(Duration::from_millis(100)).await;
     }
+
+    log_to_console(
+        Level::Debug,
+        "tank_sensor_level_embedded::logging::logger_task",
+        &format_args!("Shutting down logger task"),
+    );
 
     shut_down_complete_signal.signal(true);
 }
@@ -338,13 +317,22 @@ async fn send_logs_to_server(logs: &[LogEntry], stack: Stack<'_>, url: &str) -> 
     let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
     let tcp_client = TcpClient::new(stack, &tcp_client_state);
 
-    debug!("Creating HTTP client ...");
+    log_to_console(
+        Level::Debug,
+        "tank_sensor_level_embedded::logging::send_logs_to_server()",
+        &format_args!("Creating HTTP client ..."),
+    );
     let mut client = HttpClient::new(&tcp_client, &dns_socket);
 
     // Convert logs to JSON using serde_json_core (heapless)
     let mut json_buffer = [0u8; 2048];
     let logs_slice = if logs.len() > 10 { &logs[0..10] } else { logs }; // Limit batch size
 
+    log_to_console(
+        Level::Debug,
+        "tank_sensor_level_embedded::logging::send_logs_to_server()",
+        &format_args!("Selecting logs to send ..."),
+    );
     let mut rx_buf = [0; 4096];
     match serde_json_core::to_slice(logs_slice, &mut json_buffer) {
         Ok(size) => {
@@ -354,22 +342,42 @@ async fn send_logs_to_server(logs: &[LogEntry], stack: Stack<'_>, url: &str) -> 
                 .content_type(ContentType::ApplicationJson)
                 .body(&json_buffer[..size]);
 
-            debug!("Sending request ...");
+            log_to_console(
+                Level::Debug,
+                "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                &format_args!("Sending log POST request ..."),
+            );
             let response = response.send(&mut rx_buf).await;
 
-            debug!("Processing response ...");
+            log_to_console(
+                Level::Debug,
+                "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                &format_args!("Processing log POST response ..."),
+            );
             match response {
                 Ok(r) => {
                     if r.status.is_successful() {
-                        debug!("Sent metrics. Status code: {:?}", r.status);
+                        log_to_console(
+                            Level::Debug,
+                            "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                            &format_args!("Sent logs. Status code: {:?}", r.status),
+                        );
                         Ok(())
                     } else {
-                        error!("Failed to send metrics: Status code {:?}", r.status,);
+                        log_to_console(
+                            Level::Error,
+                            "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                            &format_args!("Failed to send logs: Status code {:?}", r.status),
+                        );
                         Err(Error::NonSuccessResponseCode)
                     }
                 }
                 Err(e) => {
-                    error!("Failed to send metrics: error {:?}", e);
+                    log_to_console(
+                        Level::Error,
+                        "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                        &format_args!("Failed to send logs: error {:?}", e),
+                    );
                     Err(Error::RequestFailed)
                 }
             }
@@ -406,7 +414,11 @@ pub fn setup(
         log::set_max_level(level);
     }
 
-    trace!("Logger is ready");
+    log_to_console(
+        Level::Debug,
+        "tank_sensor_level_embedded::logging::setup()",
+        &format_args!("Logger is ready"),
+    );
 
     // Spawn logger task
     spawner
@@ -414,7 +426,6 @@ pub fn setup(
             net_stack_provider,
             &LOGGER_SHUT_DOWN_REQUESTED_CHANNEL,
             &LOGGER_SHUT_DOWN_COMPLETE_CHANNEL,
-            &LOGGER_STATUS_SIGNAL,
         ))
         .unwrap();
 
