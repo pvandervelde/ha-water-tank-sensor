@@ -50,7 +50,7 @@ use rand_core::RngCore as _;
 use crate::RngWrapper;
 
 /// Static cell for network stack resources
-static STACK_RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+static STACK_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
 
 /// Static cell for WiFi controller
 static WIFI_CONTROLLER: StaticCell<EspWifiController<'static>> = StaticCell::new();
