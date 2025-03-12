@@ -4,13 +4,11 @@
 
 use esp_hal::rng::Rng;
 
-use uom::si::electric_potential::volt;
 use uom::si::f32::ElectricPotential as Voltage;
 use uom::si::f32::Length;
 use uom::si::f32::Pressure;
 use uom::si::f32::Ratio;
 use uom::si::f32::ThermodynamicTemperature as Temperature;
-use uom::si::length::meter;
 use uom::si::pressure::hectopascal;
 use uom::si::ratio::percent;
 use uom::si::thermodynamic_temperature::degree_celsius;
@@ -34,29 +32,6 @@ pub struct Ads1115Data {
     pub height_above_sensor: Length,
 }
 
-impl Ads1115Data {
-    /// Construct a random sample
-    #[expect(clippy::cast_precision_loss, reason = "Acceptable precision loss")]
-    pub fn random(rng: &mut Rng) -> Self {
-        let brightness_seed = rng.random() as f32 / u32::MAX as f32;
-        let battery_voltage_seed = rng.random() as f32 / u32::MAX as f32;
-        let pressure_sensor_voltage_seed = rng.random() as f32 / u32::MAX as f32;
-        let height_above_sensor_seed = rng.random() as f32 / u32::MAX as f32;
-
-        let brightness = brightness_seed * (100.0 - 50.0) + 50.0;
-        let battery_voltage = battery_voltage_seed * (12.0 - 6.0) + 6.0;
-        let pressure_sensor_voltage = pressure_sensor_voltage_seed * (24.0 - 12.0) + 12.0;
-        let height_above_sensor = height_above_sensor_seed * (1010.0 - 990.0) + 990.0;
-
-        Self::from((
-            Ratio::new::<percent>(brightness),
-            Voltage::new::<volt>(battery_voltage),
-            Voltage::new::<volt>(pressure_sensor_voltage),
-            Length::new::<meter>(height_above_sensor),
-        ))
-    }
-}
-
 impl From<(Ratio, Voltage, Voltage, Length)> for Ads1115Data {
     fn from(
         (
@@ -74,21 +49,6 @@ impl From<(Ratio, Voltage, Voltage, Length)> for Ads1115Data {
         }
     }
 }
-
-// impl TryFrom<Bme280Sample> for Ads1115Data {
-//     type Error = Error;
-
-//     fn try_from(sample: Bme280Sample) -> Result<Self, Self::Error> {
-//         let temperature = sample.temperature.ok_or(Self::Error::MissingMeasurement)?;
-//         let humidity = sample.humidity.ok_or(Self::Error::MissingMeasurement)?;
-//         let pressure = sample.pressure.ok_or(Self::Error::MissingMeasurement)?;
-//         Ok(Self {
-//             temperature,
-//             humidity,
-//             pressure,
-//         })
-//     }
-// }
 
 /// The data recorded from the BME280. It provides the environmental data (temperature, pressure, humidity)
 /// for the enclosure.

@@ -3,10 +3,11 @@ use chrono::Utc;
 
 // REST
 use axum::{
+    extract::{rejection::JsonRejection, Extension, Json, Path, Query, Request, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
+    Router,
 };
 
 use once_cell::sync::Lazy;
@@ -138,6 +139,29 @@ impl ApiResponse {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct LogData {
+    device_id: String,
+    level: String,
+    message: String,
+    boot_count: u32,
+    timestamp: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DeviceTimingData {
+    device_id: String,
+    boot_count: u32,
+    timestamp: u64,
+}
+
+#[derive(Debug, Clone)]
+struct DeviceTimeMapping {
+    boot_count: u32,
+    first_tick: u64,
+    first_timestamp: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone)]
 struct ObservabilityConfig {
     metrics_push_url: String,
@@ -145,20 +169,94 @@ struct ObservabilityConfig {
     logs_push_url: String,
 }
 
-#[instrument(fields())]
-async fn health_check() -> impl IntoResponse {
-    info!("Health check request received");
-    (
-        StatusCode::OK,
-        Json(ApiResponse::success("Service is healthy")),
-    )
+#[derive(Clone)]
+struct AppState {
+    device_time_mappings:
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, DeviceTimeMapping>>>,
 }
 
-#[instrument(fields(device_id = %sensor_data.device_id))]
+impl AppState {
+    fn new() -> Self {
+        Self {
+            device_time_mappings: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+        }
+    }
+}
+
+#[instrument()]
 async fn handle_sensor_data(
-    Json(sensor_data): Json<SensorData>,
+    payload: Result<Json<SensorData>, JsonRejection>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse>)> {
-    // Validate sensor data
+    info!("Sensor data received. Processing ...");
+
+    let sensor_data = match payload {
+        Ok(payload) => payload.0,
+        Err(JsonRejection::MissingJsonContentType(e)) => {
+            error!("The sensor data request did not have the right `Content-Type: application/json` header. Error was {:?}", e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "The data request did not have the right right `Content-Type: application/json` header.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonDataError(e)) => {
+            // Couldn't deserialize the body into the target type
+            error!(
+                "Could not deserialize the sensor data request body. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "Could not deserialize the sensor data request body.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonSyntaxError(e)) => {
+            // Syntax error in the body
+            error!(
+                "The sensor data request body has syntax errors. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The sensor data request body has syntax errors",
+                )),
+            ));
+        }
+        Err(JsonRejection::BytesRejection(e)) => {
+            // Failed to extract the request body
+            error!(
+                "The sensor data request body could not be extracted. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The sensor data request body could not be extracted",
+                )),
+            ));
+        }
+        Err(e) => {
+            // `JsonRejection` is marked `#[non_exhaustive]` so match must
+            // include a catch-all case.
+            error!(
+                "Could not process the sensor data request. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Could not process the sensor data request.",
+                )),
+            ));
+        }
+    };
+
     if let Err(e) = sensor_data.validate() {
         error!(error = %e, "Invalid sensor data received");
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
@@ -188,6 +286,266 @@ async fn handle_sensor_data(
             "Data received and processed successfully",
         )),
     ))
+}
+
+#[instrument(skip(state))]
+async fn handle_log_data(
+    State(state): State<AppState>,
+    payload: Result<Json<Vec<LogData>>, JsonRejection>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse>)> {
+    info!("Log data received. Processing ...");
+
+    let log_data_list = match payload {
+        Ok(payload) => payload.0,
+        Err(JsonRejection::MissingJsonContentType(e)) => {
+            error!("The log data request did not have the right `Content-Type: application/json` header. Error was {:?}", e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "The data request did not have the right right `Content-Type: application/json` header.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonDataError(e)) => {
+            // Couldn't deserialize the body into the target type
+            error!(
+                "Could not deserialize the log data request body. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "Could not deserialize the data request body.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonSyntaxError(e)) => {
+            // Syntax error in the body
+            error!(
+                "The log data request body has syntax errors. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The data request body has syntax errors",
+                )),
+            ));
+        }
+        Err(JsonRejection::BytesRejection(e)) => {
+            // Failed to extract the request body
+            error!(
+                "The log data request body could not be extracted. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The data request body could not be extracted",
+                )),
+            ));
+        }
+        Err(e) => {
+            // `JsonRejection` is marked `#[non_exhaustive]` so match must
+            // include a catch-all case.
+            error!("Could not process the log data request. Error was {:?}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("Could not process the data request.")),
+            ));
+        }
+    };
+
+    for log_data in log_data_list {
+        // Validate log level
+        let level = match log_data.level.to_lowercase().as_str() {
+            "error" | "warn" | "info" | "debug" | "trace" => log_data.level.to_lowercase(),
+            _ => {
+                error!("Invalid log level received: {}", log_data.level);
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("Invalid log level")),
+                ));
+            }
+        };
+
+        // Calculate real timestamp using device mapping
+        let timestamp = {
+            let mappings = state.device_time_mappings.read().await;
+            if let Some(mapping) = mappings.get(&log_data.device_id) {
+                if mapping.boot_count == log_data.boot_count {
+                    let tick_diff = log_data.timestamp - mapping.first_tick;
+                    let duration = chrono::Duration::milliseconds(tick_diff as i64);
+                    Some(mapping.first_timestamp + duration)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let timestamp_str = timestamp
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+        // Log the message using tracing with the appropriate level
+        match level.as_str() {
+            "error" => error!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
+            "warn" => tracing::warn!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
+            "info" => info!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
+            "debug" => debug!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
+            _ => tracing::trace!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
+        }
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::success("Log message processed successfully")),
+    ))
+}
+
+#[instrument(skip(state))]
+async fn handle_device_timing(
+    State(state): State<AppState>,
+    payload: Result<Json<DeviceTimingData>, JsonRejection>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse>)> {
+    info!("Device timing data received. Processing ...");
+
+    let timing_data = match payload {
+        Ok(payload) => payload.0,
+        Err(JsonRejection::MissingJsonContentType(e)) => {
+            error!("The timing data request did not have the right `Content-Type: application/json` header. Error was {:?}", e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "The data request did not have the right right `Content-Type: application/json` header.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonDataError(e)) => {
+            // Couldn't deserialize the body into the target type
+            error!(
+                "Could not deserialize the timing data request body. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "Could not deserialize the data request body.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonSyntaxError(e)) => {
+            // Syntax error in the body
+            error!(
+                "The timing data request body has syntax errors. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The data request body has syntax errors",
+                )),
+            ));
+        }
+        Err(JsonRejection::BytesRejection(e)) => {
+            // Failed to extract the request body
+            error!(
+                "The timing data request body could not be extracted. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The data request body could not be extracted",
+                )),
+            ));
+        }
+        Err(e) => {
+            // `JsonRejection` is marked `#[non_exhaustive]` so match must
+            // include a catch-all case.
+            error!(
+                "Could not process the timing data request. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("Could not process the data request.")),
+            ));
+        }
+    };
+
+    // Update device time mapping
+    let mut mappings = state.device_time_mappings.write().await;
+
+    // Always create new mapping as this is the first contact after WiFi connection
+    mappings.insert(
+        timing_data.device_id.clone(),
+        DeviceTimeMapping {
+            boot_count: timing_data.boot_count,
+            first_tick: timing_data.timestamp,
+            first_timestamp: Utc::now(),
+        },
+    );
+
+    info!(
+        device_id = %timing_data.device_id,
+        boot_count = %timing_data.boot_count,
+        ticks = %timing_data.timestamp,
+        "Device timing data received"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::success(
+            "Device timing data processed successfully",
+        )),
+    ))
+}
+
+#[instrument(fields())]
+async fn handle_health_check() -> impl IntoResponse {
+    info!("Health check request received");
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success("Service is healthy")),
+    )
 }
 
 fn init_logs(
@@ -233,46 +591,6 @@ fn init_traces(config: &ObservabilityConfig) -> Result<sdktrace::TracerProvider,
         .with_resource(RESOURCE.clone())
         .with_batch_exporter(exporter, runtime::Tokio)
         .build())
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let port = std::env::var("PORT")
-        .unwrap_or_else(|_| "8080".to_string())
-        .parse::<u16>()
-        .expect("PORT must be a valid port number");
-
-    let config = ObservabilityConfig {
-        metrics_push_url: std::env::var("METRICS_PUSH_URL")
-            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
-        trace_push_url: std::env::var("TRACING_PUSH_URL")
-            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
-        logs_push_url: std::env::var("LOGS_PUSH_URL")
-            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
-    };
-
-    // Initialize telemetry
-    let (logs, metrics, tracing) = setup_telemetry(&config)?;
-    info!("Telemetry initialized");
-
-    // Create router with routes
-    let app = Router::new()
-        .route("/api/v1/sensor", post(handle_sensor_data))
-        .route("/health", get(health_check))
-        .layer(TraceLayer::new_for_http());
-
-    info!("Server starting on port {}", port);
-
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
-        .await
-        .unwrap();
-    axum::serve(listener, app).await?;
-
-    tracing.shutdown()?;
-    metrics.shutdown()?;
-    logs.shutdown()?;
-
-    Ok(())
 }
 
 fn record_gauge<T: Into<f64>>(
@@ -421,4 +739,50 @@ fn setup_telemetry(
     global::set_meter_provider(meter_provider.clone());
 
     Ok((logger_provider, meter_provider, tracer_provider))
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let port = std::env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse::<u16>()
+        .expect("PORT must be a valid port number");
+
+    let config = ObservabilityConfig {
+        metrics_push_url: std::env::var("METRICS_PUSH_URL")
+            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
+        trace_push_url: std::env::var("TRACING_PUSH_URL")
+            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
+        logs_push_url: std::env::var("LOGS_PUSH_URL")
+            .unwrap_or_else(|_| "http://localhost:4317".to_string()),
+    };
+
+    // Initialize telemetry
+    let (logs, metrics, tracing) = setup_telemetry(&config)?;
+    info!("Telemetry initialized");
+
+    // Create app state
+    let state = AppState::new();
+
+    // Create router with routes
+    let app = Router::new()
+        .route("/api/v1/sensor", post(handle_sensor_data))
+        .route("/api/v1/timing", post(handle_device_timing))
+        .route("/api/v1/logs", post(handle_log_data))
+        .route("/health", get(handle_health_check))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+
+    info!("Server starting on port {}", port);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+        .await
+        .unwrap();
+    axum::serve(listener, app).await?;
+
+    tracing.shutdown()?;
+    metrics.shutdown()?;
+    logs.shutdown()?;
+
+    Ok(())
 }

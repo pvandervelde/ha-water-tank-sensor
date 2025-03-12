@@ -18,3 +18,7 @@ schematics/~*.kicad_sch.lck
 schematics/*-backups/
 schematics/#auto_saved_files#
 schematics/_autosave-tank-sensor.kicad_sch
+
+# Ignore the AI rules for now
+.cursor/rules/
+.windsurfrules
