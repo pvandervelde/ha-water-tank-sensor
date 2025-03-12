@@ -60,6 +60,9 @@ pub enum Error {
     #[error("Failed to push log to the buffer")]
     FailedToPushLogToBuffer,
 
+    #[error("Failed to send logs to the remote system")]
+    FailedToSendLogs,
+
     #[error("Failed to serialize the logs.")]
     FailedToSerializeLogs,
 
@@ -335,66 +338,85 @@ async fn send_logs_to_server(logs: &[LogEntry], stack: Stack<'_>, url: &str) -> 
     );
     let mut client = HttpClient::new(&tcp_client, &dns_socket);
 
+    let mut rx_buf = [0; 4096];
+
     // Convert logs to JSON using serde_json_core (heapless)
     let mut json_buffer = [0u8; 2048];
-    let logs_slice = if logs.len() > 10 { &logs[0..10] } else { logs }; // Limit batch size
 
     log_to_console(
         Level::Debug,
         "tank_sensor_level_embedded::logging::send_logs_to_server()",
         &format_args!("Selecting logs to send ..."),
     );
-    let mut rx_buf = [0; 4096];
-    match serde_json_core::to_slice(logs_slice, &mut json_buffer) {
-        Ok(size) => {
-            let mut resource = client.resource(url).await.unwrap();
-            let response = resource
-                .post(LOGGING_URL_SUB_PATH)
-                .content_type(ContentType::ApplicationJson)
-                .body(&json_buffer[..size]);
-
-            log_to_console(
-                Level::Debug,
-                "tank_sensor_level_embedded::logging::send_logs_to_server()",
-                &format_args!("Sending log POST request ..."),
-            );
-            let response = response.send(&mut rx_buf).await;
-
-            log_to_console(
-                Level::Debug,
-                "tank_sensor_level_embedded::logging::send_logs_to_server()",
-                &format_args!("Processing log POST response ..."),
-            );
-            match response {
-                Ok(r) => {
-                    if r.status.is_successful() {
-                        log_to_console(
-                            Level::Debug,
-                            "tank_sensor_level_embedded::logging::send_logs_to_server()",
-                            &format_args!("Sent logs. Status code: {:?}", r.status),
-                        );
-                        Ok(())
-                    } else {
+    for chunk in logs.chunks(10) {
+        match serde_json_core::to_slice(chunk, &mut json_buffer) {
+            Ok(size) => {
+                let resource_result = client.resource(url).await;
+                let mut resource = match resource_result {
+                    Ok(r) => r,
+                    Err(_) => {
                         log_to_console(
                             Level::Error,
                             "tank_sensor_level_embedded::logging::send_logs_to_server()",
-                            &format_args!("Failed to send logs: Status code {:?}", r.status),
+                            &format_args!("Failed to create request ..."),
                         );
-                        Err(Error::NonSuccessResponseCode)
+                        return Err(Error::FailedToSendLogs);
+                    }
+                };
+
+                let response = resource
+                    .post(LOGGING_URL_SUB_PATH)
+                    .content_type(ContentType::ApplicationJson)
+                    .body(&json_buffer[..size]);
+
+                log_to_console(
+                    Level::Debug,
+                    "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                    &format_args!("Sending log POST request ..."),
+                );
+                let response = response.send(&mut rx_buf).await;
+
+                log_to_console(
+                    Level::Debug,
+                    "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                    &format_args!("Processing log POST response ..."),
+                );
+                match response {
+                    Ok(r) => {
+                        if r.status.is_successful() {
+                            log_to_console(
+                                Level::Debug,
+                                "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                                &format_args!("Sent logs. Status code: {:?}", r.status),
+                            );
+                        } else {
+                            log_to_console(
+                                Level::Error,
+                                "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                                &format_args!("Failed to send logs: Status code {:?}", r.status),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log_to_console(
+                            Level::Error,
+                            "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                            &format_args!("Failed to send logs: error {:?}", e),
+                        );
                     }
                 }
-                Err(e) => {
-                    log_to_console(
-                        Level::Error,
-                        "tank_sensor_level_embedded::logging::send_logs_to_server()",
-                        &format_args!("Failed to send logs: error {:?}", e),
-                    );
-                    Err(Error::RequestFailed)
-                }
+            }
+            Err(e) => {
+                log_to_console(
+                    Level::Error,
+                    "tank_sensor_level_embedded::logging::send_logs_to_server()",
+                    &format_args!("Failed to send logs: error {:?}", e),
+                );
             }
         }
-        Err(_) => Err(Error::FailedToSerializeLogs),
     }
+
+    Ok(())
 }
 
 /// Setup logging
