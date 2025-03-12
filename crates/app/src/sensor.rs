@@ -35,8 +35,8 @@ use log::warn;
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Sender;
-use embassy_time::Delay;
 use embassy_time::Timer;
+use embassy_time::{Delay, Duration};
 
 use nb::block;
 use uom::si::electric_potential::volt;
@@ -274,8 +274,22 @@ async fn read_bme280(
 ) -> Result<Bme280Data, SensorError> {
     info!("Initialize BME280 environmental sensor ...");
 
-    if let Err(error) = initialize_bme280(sensor).await {
-        warn!("Could not initialize BME280 sensor: {error:?}");
+    const MAX_ATTEMPTS: u8 = 5;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match initialize_bme280(sensor).await {
+            Ok(_) => {
+                info!("BME280 sensor initialized on attempt {attempt}");
+                break;
+            }
+            Err(error) => {
+                if attempt == MAX_ATTEMPTS {
+                    error!("BME280 initialization failed after {MAX_ATTEMPTS} attempts: {error:?}");
+                    return Err(SensorError::I2c(error));
+                }
+                warn!("BME280 initialization attempt {attempt} failed: {error:?}");
+                Timer::after(Duration::from_millis(1000)).await;
+            }
+        }
     }
 
     info!(

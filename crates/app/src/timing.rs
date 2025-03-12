@@ -29,10 +29,10 @@ fn format_timing_data(boot_count: u32, ticks_in_micro_seconds: u64) -> String<25
 
     writeln!(
         buffer,
-        "{{\"device_id\":\"{device_id}\",\"boot_count\":{boot_count},\"timestamp\":{ticks:.3}}}",
+        "{{\"device_id\":\"{device_id}\",\"boot_count\":{boot_count},\"timestamp\":{ticks}}}",
         device_id = DEVICE_LOCATION,
         boot_count = boot_count,
-        ticks = (ticks_in_micro_seconds as f64) * 1e-6,
+        ticks = ticks_in_micro_seconds,
     )
     .unwrap();
 
