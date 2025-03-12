@@ -46,7 +46,7 @@ use uom::si::f32::Pressure;
 use uom::si::f32::Ratio;
 use uom::si::f32::ThermodynamicTemperature as Temperature;
 use uom::si::length::meter;
-use uom::si::pressure::{self, hectopascal};
+use uom::si::pressure::hectopascal;
 use uom::si::ratio::percent;
 use uom::si::thermodynamic_temperature::degree_celsius;
 
@@ -79,9 +79,6 @@ const EXPECTED_PRESSURE_SENSOR_VOLTAGE: f32 = 24.0;
 /// Error within sensor sampling
 #[derive(Debug, Error)]
 enum SensorError {
-    // /// Error from clock
-    // #[error("There was an error from the clock")]
-    // Clock(#[expect(unused, reason = "Never read directly")] ClockError),
     /// Error from domain
     #[error("There was an error from the domain")]
     Domain(DomainError),
@@ -93,21 +90,18 @@ enum SensorError {
     #[error("The ADC voltage range could not be set.")]
     FailedToSetAdcRange,
 
-    #[error("The voltage was too high.")]
-    VoltageTooHigh,
-
-    #[error("The voltage was too low.")]
-    VoltageTooLow,
-
     #[error("The pressure sensor voltage is not stable.")]
     PressureSensorVoltageNotStable,
-}
 
-// impl From<ClockError> for SensorError {
-//     fn from(error: ClockError) -> Self {
-//         Self::Clock(error)
-//     }
-// }
+    #[error("Failed to initialize I2C")]
+    I2cInitializationFailed,
+
+    #[error("Failed to read BME280 sensor")]
+    Bme280ReadFailed,
+
+    #[error("Failed to read ADS1115 sensor")]
+    Ads1115ReadFailed,
+}
 
 impl From<DomainError> for SensorError {
     fn from(error: DomainError) -> Self {
@@ -159,7 +153,6 @@ fn calculate_water_height_from_pressure_sensor_voltage(
     // Constants for 4-20mA sensor
     const MIN_CURRENT: f32 = 0.004; // 4mA
     const MAX_CURRENT: f32 = 0.020; // 20mA
-    const CURRENT_RANGE: f32 = MAX_CURRENT - MIN_CURRENT;
 
     // Calculate minimum voltage (at 4mA)
     let min_voltage = MIN_CURRENT * resistor;
@@ -342,7 +335,10 @@ pub async fn read_sensor_data_task(
 
     let i2c_blocking = match i2c_result {
         Ok(r) => r,
-        Err(_) => return,
+        Err(e) => {
+            error!("Failed to initialize I2C: {e:?}");
+            return;
+        }
     };
 
     let mut i2c = i2c_blocking
@@ -353,7 +349,13 @@ pub async fn read_sensor_data_task(
     // Read from the BME280
     let mut rng = peripherals.rng;
     let mut bme280_sensor = AsyncBme280::new(i2c, Delay);
-    let bme280_data = read_bme280(&mut bme280_sensor, &mut rng).await.unwrap();
+    let bme280_data = match read_bme280(&mut bme280_sensor, &mut rng).await {
+        Ok(data) => data,
+        Err(e) => {
+            error!("Failed to read BME280 sensor: {e:?}");
+            return;
+        }
+    };
     i2c = bme280_sensor.release();
 
     // power up the pressure sensor
@@ -361,13 +363,22 @@ pub async fn read_sensor_data_task(
 
     // Read from the ADS1115
     let mut ads1115_sensor = Ads1x1x::new_ads1115(i2c, TargetAddr::default());
-    let ads1115_data = read_ads1115(&mut ads1115_sensor).await.unwrap();
+    let ads1115_data = match read_ads1115(&mut ads1115_sensor).await {
+        Ok(data) => data,
+        Err(e) => {
+            error!("Failed to read ADS1115 sensor: {e:?}");
+            // Ensure we shut down the pressure sensor even on error
+            driver.set_low();
+            return;
+        }
+    };
 
     // shut down the pressure sensor
     driver.set_low();
 
     let _ = ads1115_sensor.destroy_ads1115();
 
+    // Only send data if both sensors read successfully
     sender.send((bme280_data, ads1115_data)).await;
 }
 

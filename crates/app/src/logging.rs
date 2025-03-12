@@ -7,22 +7,15 @@ use core::fmt;
 use core::fmt::Write;
 use core::str::FromStr;
 
-#[cfg(target_has_atomic = "ptr")]
-use alloc::sync::Arc;
-
 use critical_section::Mutex;
 use embassy_executor::Spawner;
 use embassy_net::dns::DnsSocket;
 use embassy_net::tcp::client::TcpClient;
 use embassy_net::tcp::client::TcpClientState;
-use embassy_net::IpEndpoint;
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::channel::Channel;
 use embassy_sync::channel::Receiver;
-use embassy_sync::channel::Sender;
-use embassy_sync::lazy_lock::LazyLock;
 use embassy_sync::signal::Signal;
 use embassy_time::Duration;
 use embassy_time::Timer;
@@ -43,10 +36,12 @@ use reqwless::request::RequestBuilder;
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::device_meta::DEVICE_LOCATION;
+use crate::device_meta::MAX_DEVICE_NAME_LENGTH;
+
 // Constants for buffer sizes
 const MAX_STORED_LOGS: usize = 100;
 const MAX_LOG_LENGTH: usize = 256;
-const HTTP_BUFFER_SIZE: usize = 2048;
 
 // HTTP specific constants
 const LOGGING_URL: &str = env!("LOGGING_URL");
@@ -55,8 +50,6 @@ const LOGGING_URL_SUB_PATH: &str = "/api/v1/logs";
 // Create static channels for logger communication
 static LOGGER_SHUT_DOWN_REQUESTED_CHANNEL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
 static LOGGER_SHUT_DOWN_COMPLETE_CHANNEL: Signal<CriticalSectionRawMutex, bool> = Signal::new();
-
-static LOGGER: LazyLock<HttpLogger> = LazyLock::new(|| HttpLogger::new());
 
 // Create a static mutex-protected log buffer
 static LOG_BUFFER: Mutex<RefCell<heapless::Deque<LogEntry, MAX_STORED_LOGS>>> =
@@ -78,27 +71,50 @@ pub enum Error {
 
     #[error("The log sending request failed")]
     RequestFailed,
+
+    #[error("Failed to spawn logger task")]
+    FailedToSpawnTask,
 }
 
 // Log entry structure
 #[derive(Clone, Serialize)]
 struct LogEntry {
-    level: Level,
+    device_id: String<MAX_DEVICE_NAME_LENGTH>,
+    level: String<32>,
     message: String<MAX_LOG_LENGTH>,
+    boot_count: u32,
     timestamp: u64, // Simple timestamp (milliseconds since boot)
 }
-
 // HTTP Logger implementation
-pub struct HttpLogger {}
+pub struct HttpLogger {
+    boot_count: core::sync::atomic::AtomicU32,
+}
 
 impl HttpLogger {
-    pub fn new() -> Self {
-        Self {}
+    pub const fn new() -> Self {
+        Self {
+            boot_count: core::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    pub fn set_boot_count(&self, count: u32) {
+        self.boot_count
+            .store(count, core::sync::atomic::Ordering::Relaxed);
     }
 
     // Store a log entry in the buffer
     fn store_log(&self, record: &Record) -> Result<(), Error> {
         let level = record.level();
+
+        let location = match String::try_from(DEVICE_LOCATION) {
+            Ok(l) => l,
+            Err(_) => String::new(),
+        };
+
+        let level_as_str = match String::try_from(level.as_str()) {
+            Ok(l) => l,
+            Err(_) => String::new(),
+        };
 
         // Format the log message
         let mut message = String::new();
@@ -106,7 +122,9 @@ impl HttpLogger {
 
         // Create the log entry
         let entry = LogEntry {
-            level,
+            device_id: location,
+            boot_count: self.boot_count.load(core::sync::atomic::Ordering::Relaxed),
+            level: level_as_str,
             message,
             timestamp: now().ticks(),
         };
@@ -188,7 +206,7 @@ fn log_to_console(level: Level, target: &str, args: &fmt::Arguments) {
 
     // Print to console with colors
     println!(
-        "{}{:>5} {}{}{}{}]{} {}",
+        "{}{:>5} {}{}{}{}{} {}",
         color, level, RESET, GRAY, target, GRAY, RESET, args
     );
 }
@@ -199,7 +217,6 @@ pub async fn logger_task(
     shut_down_requested_signal: &'static Signal<CriticalSectionRawMutex, bool>,
     shut_down_complete_signal: &'static Signal<CriticalSectionRawMutex, bool>,
 ) {
-    let mut shutdown_requested = false;
     let mut temp_log_buffer: Vec<LogEntry, MAX_STORED_LOGS> = Vec::new();
     let mut retry_interval = 10000; // 10 seconds
     let mut last_send_attempt = 0;
@@ -212,7 +229,7 @@ pub async fn logger_task(
         &format_args!("Starting logging sending loop ..."),
     );
     loop {
-        shutdown_requested = shut_down_requested_signal.signaled();
+        let shutdown_requested = shut_down_requested_signal.signaled();
 
         if stack.is_none() {
             let potential_stack = net_stack_provider.try_receive();
@@ -223,12 +240,6 @@ pub async fn logger_task(
                     &format_args!("Network stack obtained. Starting log sending ..."),
                 );
                 stack = Some(net_stack);
-            } else {
-                log_to_console(
-                    Level::Debug,
-                    "tank_sensor_level_embedded::logging::logger_task",
-                    &format_args!("No network stack found. Unable to send logs ..."),
-                );
             }
         } else {
             let current_time = embassy_time::Instant::now().as_millis();
@@ -397,11 +408,22 @@ async fn send_logs_to_server(logs: &[LogEntry], stack: Stack<'_>, url: &str) -> 
 pub fn setup(
     spawner: Spawner,
     net_stack_provider: Receiver<'static, NoopRawMutex, Stack<'_>, 1>,
-) -> Result<&'static Signal<CriticalSectionRawMutex, bool>, Error> {
+    boot_count: u32,
+) -> Result<
+    (
+        &'static Signal<CriticalSectionRawMutex, bool>,
+        &'static Signal<CriticalSectionRawMutex, bool>,
+    ),
+    Error,
+> {
     // Initialize the static buffer
+    static LOGGER: HttpLogger = HttpLogger::new();
+
+    // Initialize the logger with the boot count
+    LOGGER.set_boot_count(boot_count);
 
     // Set the logger
-    let logger_set_result = log::set_logger(LOGGER.get());
+    let logger_set_result = log::set_logger(&LOGGER);
     if logger_set_result.is_err() {
         return Err(Error::FailedToSetLogger);
     }
@@ -421,13 +443,17 @@ pub fn setup(
     );
 
     // Spawn logger task
-    spawner
-        .spawn(logger_task(
-            net_stack_provider,
-            &LOGGER_SHUT_DOWN_REQUESTED_CHANNEL,
-            &LOGGER_SHUT_DOWN_COMPLETE_CHANNEL,
-        ))
-        .unwrap();
+    if let Err(e) = spawner.spawn(logger_task(
+        net_stack_provider,
+        &LOGGER_SHUT_DOWN_REQUESTED_CHANNEL,
+        &LOGGER_SHUT_DOWN_COMPLETE_CHANNEL,
+    )) {
+        error!("Failed to spawn logger task: {e:?}");
+        return Err(Error::FailedToSpawnTask);
+    }
 
-    Ok(&LOGGER_SHUT_DOWN_REQUESTED_CHANNEL)
+    Ok((
+        &LOGGER_SHUT_DOWN_REQUESTED_CHANNEL,
+        &LOGGER_SHUT_DOWN_COMPLETE_CHANNEL,
+    ))
 }

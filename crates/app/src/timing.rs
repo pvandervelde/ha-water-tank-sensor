@@ -3,7 +3,7 @@ use core::fmt::Write;
 use embassy_net::tcp::client::TcpClientState;
 use embassy_net::Stack;
 use embassy_net::{dns::DnsSocket, tcp::client::TcpClient};
-use esp_hal::time::{now, Instant};
+use esp_hal::time::now;
 use heapless::String;
 use log::{debug, error};
 use reqwless::client::HttpClient;
@@ -11,7 +11,6 @@ use reqwless::{headers::ContentType, request::RequestBuilder};
 use thiserror::Error;
 
 use crate::device_meta::DEVICE_LOCATION;
-use crate::meta::CARGO_PKG_VERSION;
 
 const METRICS_URL: &str = env!("METRICS_URL");
 
@@ -25,15 +24,12 @@ pub enum Error {
     RequestFailed,
 }
 
-fn format_timing_data(
-    boot_count: u32,
-    ticks_in_micro_seconds: u64,
-) -> String<256> {
+fn format_timing_data(boot_count: u32, ticks_in_micro_seconds: u64) -> String<256> {
     let mut buffer: String<256> = String::new();
 
     writeln!(
         buffer,
-        "{{\"device_id\":\"{device_id}\",\"boot_count\":{boot_count},\"ticks\":{ticks:.3}}}",
+        "{{\"device_id\":\"{device_id}\",\"boot_count\":{boot_count},\"timestamp\":{ticks:.3}}}",
         device_id = DEVICE_LOCATION,
         boot_count = boot_count,
         ticks = (ticks_in_micro_seconds as f64) * 1e-6,
@@ -44,16 +40,10 @@ fn format_timing_data(
 }
 
 /// Send timing data to the server immediately after WiFi connection
-pub async fn send_timing_data(
-    stack: Stack<'_>,
-    boot_count: u32,
-) -> Result<(), Error> {
+pub async fn send_timing_data(stack: Stack<'_>, boot_count: u32) -> Result<(), Error> {
     debug!("Sending timing data...");
 
-    let timing_data = format_timing_data(
-        boot_count,
-        now().ticks(),
-    );
+    let timing_data = format_timing_data(boot_count, now().ticks());
     let bytes = timing_data.as_bytes();
 
     let dns_socket = DnsSocket::new(stack);

@@ -3,7 +3,11 @@ use chrono::Utc;
 
 // REST
 use axum::{
-    extract::State, http::StatusCode, response::IntoResponse, routing::{get, post}, Json, Router 
+    extract::{rejection::JsonRejection, Extension, Json, Path, Query, Request, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Router,
 };
 
 use once_cell::sync::Lazy;
@@ -138,23 +142,23 @@ impl ApiResponse {
 #[derive(Debug, Deserialize, Serialize)]
 struct LogData {
     device_id: String,
-    boot_count: u32,
-    ticks: f64,
     level: String,
     message: String,
+    boot_count: u32,
+    timestamp: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 struct DeviceTimingData {
     device_id: String,
     boot_count: u32,
-    ticks: f64,
+    timestamp: u64,
 }
 
 #[derive(Debug, Clone)]
 struct DeviceTimeMapping {
     boot_count: u32,
-    first_tick: f64,
+    first_tick: u64,
     first_timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -167,22 +171,92 @@ struct ObservabilityConfig {
 
 #[derive(Clone)]
 struct AppState {
-    device_time_mappings: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, DeviceTimeMapping>>>,
+    device_time_mappings:
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, DeviceTimeMapping>>>,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
-            device_time_mappings: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            device_time_mappings: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 }
 
-#[instrument(fields(device_id = %sensor_data.device_id))]
+#[instrument()]
 async fn handle_sensor_data(
-    Json(sensor_data): Json<SensorData>,
+    payload: Result<Json<SensorData>, JsonRejection>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse>)> {
     info!("Sensor data received. Processing ...");
+
+    let sensor_data = match payload {
+        Ok(payload) => payload.0,
+        Err(JsonRejection::MissingJsonContentType(e)) => {
+            error!("The sensor data request did not have the right `Content-Type: application/json` header. Error was {:?}", e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "The data request did not have the right right `Content-Type: application/json` header.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonDataError(e)) => {
+            // Couldn't deserialize the body into the target type
+            error!(
+                "Could not deserialize the sensor data request body. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "Could not deserialize the sensor data request body.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonSyntaxError(e)) => {
+            // Syntax error in the body
+            error!(
+                "The sensor data request body has syntax errors. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The sensor data request body has syntax errors",
+                )),
+            ));
+        }
+        Err(JsonRejection::BytesRejection(e)) => {
+            // Failed to extract the request body
+            error!(
+                "The sensor data request body could not be extracted. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The sensor data request body could not be extracted",
+                )),
+            ));
+        }
+        Err(e) => {
+            // `JsonRejection` is marked `#[non_exhaustive]` so match must
+            // include a catch-all case.
+            error!(
+                "Could not process the sensor data request. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Could not process the sensor data request.",
+                )),
+            ));
+        }
+    };
+
     if let Err(e) = sensor_data.validate() {
         error!(error = %e, "Invalid sensor data received");
         return Err((StatusCode::BAD_REQUEST, Json(ApiResponse::error(e))));
@@ -214,87 +288,150 @@ async fn handle_sensor_data(
     ))
 }
 
-#[instrument(fields(device_id = %log_data.device_id), skip(state))]
+#[instrument(skip(state))]
 async fn handle_log_data(
     State(state): State<AppState>,
-    Json(log_data): Json<LogData>,
+    payload: Result<Json<Vec<LogData>>, JsonRejection>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse>)> {
     info!("Log data received. Processing ...");
-    
-    // Validate log level
-    let level = match log_data.level.to_lowercase().as_str() {
-        "error" | "warn" | "info" | "debug" | "trace" => log_data.level.to_lowercase(),
-        _ => {
-            error!("Invalid log level received: {}", log_data.level);
+
+    let log_data_list = match payload {
+        Ok(payload) => payload.0,
+        Err(JsonRejection::MissingJsonContentType(e)) => {
+            error!("The log data request did not have the right `Content-Type: application/json` header. Error was {:?}", e);
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error("Invalid log level")),
+                Json(ApiResponse::error(
+                    "The data request did not have the right right `Content-Type: application/json` header.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonDataError(e)) => {
+            // Couldn't deserialize the body into the target type
+            error!(
+                "Could not deserialize the log data request body. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "Could not deserialize the data request body.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonSyntaxError(e)) => {
+            // Syntax error in the body
+            error!(
+                "The log data request body has syntax errors. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The data request body has syntax errors",
+                )),
+            ));
+        }
+        Err(JsonRejection::BytesRejection(e)) => {
+            // Failed to extract the request body
+            error!(
+                "The log data request body could not be extracted. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The data request body could not be extracted",
+                )),
+            ));
+        }
+        Err(e) => {
+            // `JsonRejection` is marked `#[non_exhaustive]` so match must
+            // include a catch-all case.
+            error!("Could not process the log data request. Error was {:?}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("Could not process the data request.")),
             ));
         }
     };
 
-    // Calculate real timestamp using device mapping
-    let timestamp = {
-        let mappings = state.device_time_mappings.read().await;
-        if let Some(mapping) = mappings.get(&log_data.device_id) {
-            if mapping.boot_count == log_data.boot_count {
-                let tick_diff = log_data.ticks - mapping.first_tick;
-                let duration = chrono::Duration::milliseconds((tick_diff * 1000.0) as i64);
-                Some(mapping.first_timestamp + duration)
+    for log_data in log_data_list {
+        // Validate log level
+        let level = match log_data.level.to_lowercase().as_str() {
+            "error" | "warn" | "info" | "debug" | "trace" => log_data.level.to_lowercase(),
+            _ => {
+                error!("Invalid log level received: {}", log_data.level);
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error("Invalid log level")),
+                ));
+            }
+        };
+
+        // Calculate real timestamp using device mapping
+        let timestamp = {
+            let mappings = state.device_time_mappings.read().await;
+            if let Some(mapping) = mappings.get(&log_data.device_id) {
+                if mapping.boot_count == log_data.boot_count {
+                    let tick_diff = log_data.timestamp - mapping.first_tick;
+                    let duration = chrono::Duration::milliseconds(tick_diff as i64);
+                    Some(mapping.first_timestamp + duration)
+                } else {
+                    None
+                }
             } else {
                 None
             }
-        } else {
-            None
+        };
+
+        let timestamp_str = timestamp
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+        // Log the message using tracing with the appropriate level
+        match level.as_str() {
+            "error" => error!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
+            "warn" => tracing::warn!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
+            "info" => info!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
+            "debug" => debug!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
+            _ => tracing::trace!(
+                device_id = %log_data.device_id,
+                boot_count = %log_data.boot_count,
+                device_ticks = %log_data.timestamp,
+                timestamp = %timestamp_str,
+                message = %log_data.message,
+                "Device log"
+            ),
         }
-    };
-
-    let timestamp_str = timestamp
-        .map(|t| t.to_rfc3339())
-        .unwrap_or_else(|| Utc::now().to_rfc3339());
-
-    // Log the message using tracing with the appropriate level
-    match level.as_str() {
-        "error" => error!(
-            device_id = %log_data.device_id,
-            boot_count = %log_data.boot_count,
-            device_ticks = %log_data.ticks,
-            timestamp = %timestamp_str,
-            message = %log_data.message,
-            "Device log"
-        ),
-        "warn" => tracing::warn!(
-            device_id = %log_data.device_id,
-            boot_count = %log_data.boot_count,
-            device_ticks = %log_data.ticks,
-            timestamp = %timestamp_str,
-            message = %log_data.message,
-            "Device log"
-        ),
-        "info" => info!(
-            device_id = %log_data.device_id,
-            boot_count = %log_data.boot_count,
-            device_ticks = %log_data.ticks,
-            timestamp = %timestamp_str,
-            message = %log_data.message,
-            "Device log"
-        ),
-        "debug" => debug!(
-            device_id = %log_data.device_id,
-            boot_count = %log_data.boot_count,
-            device_ticks = %log_data.ticks,
-            timestamp = %timestamp_str,
-            message = %log_data.message,
-            "Device log"
-        ),
-        _ => tracing::trace!(
-            device_id = %log_data.device_id,
-            boot_count = %log_data.boot_count,
-            device_ticks = %log_data.ticks,
-            timestamp = %timestamp_str,
-            message = %log_data.message,
-            "Device log"
-        ),
     }
 
     Ok((
@@ -303,22 +440,86 @@ async fn handle_log_data(
     ))
 }
 
-#[instrument(fields(device_id = %timing_data.device_id), skip(state))]
+#[instrument(skip(state))]
 async fn handle_device_timing(
     State(state): State<AppState>,
-    Json(timing_data): Json<DeviceTimingData>,
+    payload: Result<Json<DeviceTimingData>, JsonRejection>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiResponse>)> {
     info!("Device timing data received. Processing ...");
-    
+
+    let timing_data = match payload {
+        Ok(payload) => payload.0,
+        Err(JsonRejection::MissingJsonContentType(e)) => {
+            error!("The timing data request did not have the right `Content-Type: application/json` header. Error was {:?}", e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "The data request did not have the right right `Content-Type: application/json` header.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonDataError(e)) => {
+            // Couldn't deserialize the body into the target type
+            error!(
+                "Could not deserialize the timing data request body. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "Could not deserialize the data request body.",
+                )),
+            ));
+        }
+        Err(JsonRejection::JsonSyntaxError(e)) => {
+            // Syntax error in the body
+            error!(
+                "The timing data request body has syntax errors. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The data request body has syntax errors",
+                )),
+            ));
+        }
+        Err(JsonRejection::BytesRejection(e)) => {
+            // Failed to extract the request body
+            error!(
+                "The timing data request body could not be extracted. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::NOT_ACCEPTABLE,
+                Json(ApiResponse::error(
+                    "The data request body could not be extracted",
+                )),
+            ));
+        }
+        Err(e) => {
+            // `JsonRejection` is marked `#[non_exhaustive]` so match must
+            // include a catch-all case.
+            error!(
+                "Could not process the timing data request. Error was {:?}",
+                e
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("Could not process the data request.")),
+            ));
+        }
+    };
+
     // Update device time mapping
     let mut mappings = state.device_time_mappings.write().await;
-    
+
     // Always create new mapping as this is the first contact after WiFi connection
     mappings.insert(
         timing_data.device_id.clone(),
         DeviceTimeMapping {
             boot_count: timing_data.boot_count,
-            first_tick: timing_data.ticks,
+            first_tick: timing_data.timestamp,
             first_timestamp: Utc::now(),
         },
     );
@@ -326,13 +527,15 @@ async fn handle_device_timing(
     info!(
         device_id = %timing_data.device_id,
         boot_count = %timing_data.boot_count,
-        ticks = %timing_data.ticks,
+        ticks = %timing_data.timestamp,
         "Device timing data received"
     );
 
     Ok((
         StatusCode::OK,
-        Json(ApiResponse::success("Device timing data processed successfully")),
+        Json(ApiResponse::success(
+            "Device timing data processed successfully",
+        )),
     ))
 }
 
@@ -344,7 +547,7 @@ async fn handle_health_check() -> impl IntoResponse {
         Json(ApiResponse::success("Service is healthy")),
     )
 }
- 
+
 fn init_logs(
     config: &ObservabilityConfig,
 ) -> Result<opentelemetry_sdk::logs::LoggerProvider, LogError> {

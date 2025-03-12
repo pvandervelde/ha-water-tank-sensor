@@ -65,6 +65,10 @@ pub enum Error {
     /// Error during WiFi operation
     #[error("An error occured with the Wifi.")]
     Wifi(EspWifiError),
+
+    /// Failed to spawn network task
+    #[error("Failed to spawn network task")]
+    NetworkTaskSpawnFailed,
 }
 
 impl From<WifiInitializationError> for Error {
@@ -105,7 +109,10 @@ pub async fn connect<'a>(
     let (stack, runner) = new_network_stack(wifi_interface, config, stack_resources, seed);
 
     connection_fallible(&mut controller, ssid, password).await?;
-    spawner.must_spawn(net_task(runner));
+    if let Err(e) = spawner.spawn(net_task(runner)) {
+        error!("Failed to spawn network task: {e:?}");
+        return Err(Error::NetworkTaskSpawnFailed);
+    }
 
     debug!("Wait for network link");
     loop {

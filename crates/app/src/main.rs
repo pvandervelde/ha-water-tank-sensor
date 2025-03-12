@@ -61,8 +61,6 @@ use self::data_recording::update_task as send_data_task;
 
 mod device_meta;
 
-mod http;
-
 mod logging;
 use self::logging::setup as setup_logging;
 
@@ -141,6 +139,18 @@ enum Error {
         #[from]
         source: WifiError,
     },
+
+    /// Failed to spawn task
+    #[error("Failed to spawn task")]
+    FailedToSpawnTask,
+
+    /// Failed to send network stack
+    #[error("Failed to send network stack")]
+    NetworkStackSendFailed,
+
+    /// Failed to process data
+    #[error("Failed to process data")]
+    DataProcessingFailed,
 }
 
 async fn connect_to_wifi<'a>(
@@ -193,19 +203,6 @@ async fn main(spawner: Spawner) {
         config
     });
 
-    let wifi_provider_channel: &'static mut _ = WIFI_STACK_CHANNEL.init(Channel::new());
-    let wifi_receiver = wifi_provider_channel.receiver();
-    let wifi_sender = wifi_provider_channel.sender();
-
-    let logger_result = setup_logging(spawner, wifi_receiver);
-    if logger_result.is_err() {
-        // Everything is stuffed. Just go back to sleep
-        enter_deep_sleep(
-            peripherals.LPWR,
-            hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
-        );
-    }
-
     // SAFETY:
     // This is the only place where a mutable reference is taken
     let boot_count: Option<&'static mut _> = unsafe { BOOT_COUNT.get().as_mut() };
@@ -214,6 +211,19 @@ async fn main(spawner: Spawner) {
     let boot_count: &'static mut _ = unsafe { boot_count.unwrap_unchecked() };
     info!("Current boot count = {boot_count}");
     *boot_count += 1;
+
+    let wifi_provider_channel: &'static mut _ = WIFI_STACK_CHANNEL.init(Channel::new());
+    let wifi_receiver = wifi_provider_channel.receiver();
+    let wifi_sender = wifi_provider_channel.sender();
+
+    let logger_result = setup_logging(spawner, wifi_receiver, *boot_count);
+    if logger_result.is_err() {
+        // Everything is stuffed. Just go back to sleep
+        enter_deep_sleep(
+            peripherals.LPWR,
+            hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
+        );
+    }
 
     if let Err(error) = main_fallible(
         spawner,
@@ -233,10 +243,15 @@ async fn main_fallible(
     spawner: Spawner,
     mut peripherals: Peripherals,
     wifi_stack_sender: Sender<'static, NoopRawMutex, Stack<'static>, 1>,
-    logger_shutdown: &'static Signal<CriticalSectionRawMutex, bool>,
+    logger_signals: (
+        &'static Signal<CriticalSectionRawMutex, bool>,
+        &'static Signal<CriticalSectionRawMutex, bool>,
+    ),
     boot_count: u32,
 ) -> Result<(), Error> {
     init_heap();
+
+    let (logger_shutdown_request_signal, logger_shutdown_complete_signal) = logger_signals;
 
     let start_time = now();
     {
@@ -245,14 +260,25 @@ async fn main_fallible(
 
         let rng = Rng::new(&mut peripherals.RNG);
 
-        let (mut wifi_guard, stack) = connect_to_wifi(
+        // Connect to WiFi and get network stack
+        info!("Connecting to WiFi network");
+        let (mut wifi_guard, stack) = match connect_to_wifi(
             spawner,
             peripherals.TIMG0,
             peripherals.WIFI,
             peripherals.RADIO_CLK,
             rng,
         )
-        .await?;
+        .await
+        {
+            Ok((guard, stack)) => (guard, stack),
+            Err(e) => {
+                error!("Failed to connect to WiFi: {e:?}");
+                // Signal logger to shut down before returning
+                logger_shutdown_request_signal.signal(true);
+                return Err(e);
+            }
+        };
 
         // Get duration for operations
         let current_time = now();
@@ -266,7 +292,7 @@ async fn main_fallible(
             // Continue execution even if timing data fails, as we can still try to send sensor data
         }
 
-        // NETWORK STACK PROVIDER???
+        // Send network stack to provider
         wifi_stack_sender.send(stack).await;
 
         let data_sent_channel: &'static mut _ = DATA_SEND_CHANNEL.init(Channel::new());
@@ -274,19 +300,24 @@ async fn main_fallible(
         let data_sent_sender = data_sent_channel.sender();
 
         info!("Setup data sending task");
-        let sensor_data_sender = setup_data_transmitting_task(
+        let sensor_data_sender = match setup_data_transmitting_task(
             spawner,
             stack,
             data_sent_sender,
             boot_count,
             start_time,
             wifi_start_time_in_micro_seconds,
-        )?;
-
-        // Number of samples
+        ) {
+            Ok(sender) => sender,
+            Err(e) => {
+                error!("Failed to setup data transmitting task: {e:?}");
+                logger_shutdown_request_signal.signal(true);
+                return Err(e);
+            }
+        };
 
         info!("Setup environment sensor task");
-        setup_sensor_task(
+        if let Err(e) = setup_sensor_task(
             spawner,
             SensorPeripherals {
                 sda: peripherals.GPIO10,
@@ -296,12 +327,18 @@ async fn main_fallible(
                 rng,
             },
             sensor_data_sender,
-        );
+        ) {
+            error!("Failed to setup sensor task: {e:?}");
+            logger_shutdown_request_signal.signal(true);
+            return Err(e);
+        }
 
         info!("Waiting for sensors to complete tasks");
         let was_processed = data_sent_receiver.receive().await;
         if !was_processed {
             error!("Failed to process the data");
+            logger_shutdown_request_signal.signal(true);
+            return Err(Error::DataProcessingFailed);
         }
 
         info!("Wait for {}s", WAIT_AFTER_SENT_PERIOD_IN_SECONDS);
@@ -316,13 +353,17 @@ async fn main_fallible(
             DEEP_SLEEP_DURATION_IN_SECONDS,
         );
 
-        logger_shutdown.signal(true);
+        logger_shutdown_request_signal.signal(true);
 
-        // If something goes wrong before this point then the guard is dropped which causes
-        // the wifi to disconnect. If that
-        let connected_result = wifi_guard.is_connected();
-        if connected_result.is_ok() && connected_result.unwrap() {
-            let _ = wifi_guard.disconnect();
+        let _logger_is_done = logger_shutdown_complete_signal.wait().await;
+
+        // Ensure WiFi is disconnected properly
+        if let Ok(is_connected) = wifi_guard.is_connected() {
+            if is_connected {
+                if let Err(e) = wifi_guard.disconnect() {
+                    error!("Failed to disconnect WiFi: {e:?}");
+                }
+            }
         }
     }
 
@@ -330,6 +371,7 @@ async fn main_fallible(
         peripherals.LPWR,
         hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
     );
+    //Ok(())
 }
 
 fn setup_data_transmitting_task(
@@ -346,14 +388,17 @@ fn setup_data_transmitting_task(
     let sensor_sender = sensor_channel.sender();
 
     info!("Spawning data sending task");
-    spawner.must_spawn(send_data_task(
+    if let Err(e) = spawner.spawn(send_data_task(
         stack,
         sensor_receiver,
         data_sent_sender,
         boot_count,
         system_start_time,
         wifi_start_time_in_micro_seconds,
-    ));
+    )) {
+        error!("Failed to spawn data sending task: {e:?}");
+        return Err(Error::FailedToSpawnTask);
+    }
 
     Ok(sensor_sender)
 }
@@ -363,7 +408,11 @@ fn setup_sensor_task(
     spawner: Spawner,
     peripherals: SensorPeripherals,
     sender: Sender<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
-) {
+) -> Result<(), Error> {
     info!("Spawning environmental sensor task");
-    spawner.must_spawn(read_sensor_data_task(peripherals, sender));
+    if let Err(e) = spawner.spawn(read_sensor_data_task(peripherals, sender)) {
+        error!("Failed to spawn sensor task: {e:?}");
+        return Err(Error::FailedToSpawnTask);
+    }
+    Ok(())
 }
