@@ -3,8 +3,6 @@ use core::fmt::Write;
 use embassy_net::tcp::client::TcpClientState;
 use embassy_net::Stack;
 use embassy_net::{dns::DnsSocket, tcp::client::TcpClient};
-use embassy_sync::channel::Sender;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Receiver};
 
 use esp_hal::time::{now, Instant};
 use heapless::String;
@@ -107,32 +105,29 @@ fn log_bme280_reading(sample: &Bme280Data) {
     info!(" ┗ Pressure:    {:.2} hPa", pressure);
 }
 
-async fn receive_sensor_data(
-    receiver: &Receiver<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
-) -> Result<(Bme280Data, Ads1115Data), Error> {
-    info!("Wait for data from the sensors ...");
-
-    let reading = receiver.receive().await;
-    log_ads1115_reading(&reading.1);
-    log_bme280_reading(&reading.0);
-
-    Ok(reading)
-}
-
-async fn send_metrics<'a>(
-    stack: Stack<'a>,
+pub async fn send_metrics_to_server(
+    stack: Stack<'static>,
+    bme280_reading: Bme280Data,
+    ads1115_reading: Ads1115Data,
     boot_count: u32,
-    bme280_data: Bme280Data,
-    ads1115_data: Ads1115Data,
-    run_time_in_micro_seconds: u64,
+    system_start_time: Instant,
     wifi_start_time: u64,
 ) -> Result<(), Error> {
-    info!("Sending metrics ...");
+    info!("Sending metrics to server ...");
+
+    let current_time = now();
+    let run_time_in_micro_seconds = current_time
+        .checked_duration_since(system_start_time)
+        .unwrap()
+        .to_micros();
+
+    log_ads1115_reading(&ads1115_reading);
+    log_bme280_reading(&bme280_reading);
 
     let metrics = format_metrics(
         boot_count,
-        bme280_data,
-        ads1115_data,
+        bme280_reading,
+        ads1115_reading,
         run_time_in_micro_seconds,
         wifi_start_time,
     );
@@ -173,46 +168,4 @@ async fn send_metrics<'a>(
             Err(Error::RequestFailed)
         }
     }
-}
-
-#[embassy_executor::task]
-pub async fn update_task(
-    stack: Stack<'static>,
-    sensor_data_receiver: Receiver<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
-    data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
-    boot_count: u32,
-    system_start_time: Instant,
-    wifi_start_time: u64,
-) {
-    // Get data from the sensors
-    let (bme280_reading, ads1115_reading) = match receive_sensor_data(&sensor_data_receiver).await {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Failed to read the environmental data: {e:?}");
-            return;
-        }
-    };
-
-    // Get duration for operations
-    let current_time = now();
-    let run_time_in_micro_seconds = current_time
-        .checked_duration_since(system_start_time)
-        .unwrap()
-        .to_micros();
-
-    // Get data from AD converter
-    if let Err(error) = send_metrics(
-        stack,
-        boot_count,
-        bme280_reading,
-        ads1115_reading,
-        run_time_in_micro_seconds,
-        wifi_start_time,
-    )
-    .await
-    {
-        error!("Could not send metrics: {error:?}");
-    }
-
-    data_sent_sender.send(true).await;
 }
