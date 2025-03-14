@@ -154,12 +154,6 @@ impl Log for HttpLogger {
     }
 }
 
-// Increase retry interval with exponential backoff
-fn increase_retry_interval(interval: &mut u64) {
-    const MAX_RETRY_INTERVAL: u64 = 600000; // 10 minutes
-    *interval = (*interval * 2).min(MAX_RETRY_INTERVAL);
-}
-
 fn log_to_console(level: Level, target: &str, args: &fmt::Arguments) {
     /// Modifier for restoring normal text style
     const RESET: &str = "\u{001B}[0m";
@@ -193,17 +187,12 @@ fn log_to_console(level: Level, target: &str, args: &fmt::Arguments) {
 
 pub async fn send_logs_to_server(stack: Stack<'static>) -> Result<(), Error> {
     let mut temp_log_buffer: Vec<LogEntry, MAX_STORED_LOGS> = Vec::new();
-    let mut retry_interval = 10000; // 10 seconds
-    let mut last_send_attempt = 0;
 
     log_to_console(
         Level::Debug,
         "tank_sensor_level_embedded::logging::logger_task",
         &format_args!("Sending logs to server ..."),
     );
-
-    let current_time = embassy_time::Instant::now().as_millis();
-    let time_since_last_attempt = current_time.saturating_sub(last_send_attempt);
 
     // Take logs from the main buffer if our temp buffer is empty
     if temp_log_buffer.is_empty() {
@@ -222,11 +211,14 @@ pub async fn send_logs_to_server(stack: Stack<'static>) -> Result<(), Error> {
         });
     }
 
+    log_to_console(
+        Level::Debug,
+        "tank_sensor_level_embedded::logging::logger_task",
+        &format_args!("Sending logs to server ..."),
+    );
     loop {
         // If we have logs to send and enough time has passed
-        if !temp_log_buffer.is_empty() && time_since_last_attempt >= retry_interval {
-            last_send_attempt = current_time;
-
+        if !temp_log_buffer.is_empty() {
             // Try to send logs
             log_to_console(
                 Level::Debug,
@@ -237,11 +229,19 @@ pub async fn send_logs_to_server(stack: Stack<'static>) -> Result<(), Error> {
                 Ok(()) => {
                     // Success - clear sent logs
                     temp_log_buffer.clear();
+                    log_to_console(
+                        Level::Info,
+                        "tank_sensor_level_embedded::logging::logger_task",
+                        &format_args!("Logs send to server successfully"),
+                    );
                     break;
                 }
-                Err(_) => {
-                    // Failed - increase retry interval
-                    increase_retry_interval(&mut retry_interval);
+                Err(e) => {
+                    log_to_console(
+                        Level::Error,
+                        "tank_sensor_level_embedded::logging::logger_task",
+                        &format_args!("Failed to send logs to the server. Error was {e:?}"),
+                    );
                 }
             }
         } else if temp_log_buffer.is_empty() {

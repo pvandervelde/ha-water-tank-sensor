@@ -20,5 +20,6 @@ schematics/#auto_saved_files#
 schematics/_autosave-tank-sensor.kicad_sch
 
 # Ignore the AI rules for now
+.clinerules
 .cursor/rules/
 .windsurfrules

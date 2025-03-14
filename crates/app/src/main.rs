@@ -7,12 +7,11 @@ extern crate alloc;
 
 use core::convert::Infallible;
 
-use embassy_net::Stack;
 use esp_hal::peripherals::Peripherals;
 use esp_hal::ram;
+use esp_hal::reset::software_reset;
 use esp_hal::time::now;
 use esp_hal_embassy::main;
-use esp_wifi::wifi::WifiController;
 use log::error;
 use log::info;
 
@@ -22,19 +21,13 @@ use esp_alloc as _;
 
 use esp_hal::clock::CpuClock;
 use esp_hal::init as initialize_esp_hal;
-use esp_hal::peripherals::RADIO_CLK;
-use esp_hal::peripherals::TIMG0;
-use esp_hal::peripherals::WIFI;
 use esp_hal::rng::Rng;
 use esp_hal::timer::systimer::SystemTimer;
-use esp_hal::timer::timg::TimerGroup;
 use esp_hal::Config as EspConfig;
 
 use esp_hal_embassy::init as initialize_embassy;
 
 use logging::send_logs_to_server;
-use scopeguard::guard;
-use scopeguard::ScopeGuard;
 use thiserror::Error;
 
 use heapless::String;
@@ -72,7 +65,7 @@ mod timing;
 use self::timing::send_timing_data;
 
 mod wifi;
-use self::wifi::Error as WifiError;
+use self::wifi::WifiConnectionError as WifiError;
 
 /// Duration of deep sleep
 const DEEP_SLEEP_DURATION_IN_SECONDS: u32 = 30;
@@ -103,44 +96,12 @@ enum Error {
         source: Infallible,
     },
 
-    /// Error while parsing SSID or password
-    #[error("Error while parsing SSID or password")]
-    ParseCredentials,
-
     /// An error within WiFi operations
     #[error("An error within WiFi operations")]
     Wifi {
         #[from]
         source: WifiError,
     },
-}
-
-async fn connect_to_wifi<'a>(
-    spawner: Spawner,
-    timg0: TIMG0,
-    wifi: WIFI,
-    radio_clk: RADIO_CLK,
-    rng: Rng,
-) -> Result<
-    (
-        ScopeGuard<WifiController<'a>, impl FnOnce(WifiController<'a>)>,
-        Stack<'a>,
-    ),
-    Error,
-> {
-    let ssid = String::<32>::try_from(WIFI_SSID).map_err(|()| Error::ParseCredentials)?;
-    let password = String::<64>::try_from(WIFI_PASSWORD).map_err(|()| Error::ParseCredentials)?;
-
-    info!("Connect to WiFi");
-    let timg0 = TimerGroup::new(timg0);
-    let (controller, stack) =
-        wifi::connect(spawner, timg0, rng, wifi, radio_clk, (ssid, password)).await?;
-    let guard = guard(controller, |mut c| {
-        info!("Disconnecting from wifi ...");
-        let _ = c.disconnect();
-    });
-
-    Ok((guard, stack))
 }
 
 fn init_heap() {
@@ -197,62 +158,38 @@ async fn main_fallible(spawner: Spawner, mut peripherals: Peripherals, boot_coun
     let rng = Rng::new(&mut peripherals.RNG);
 
     // Connect to WiFi and get network stack
-    info!("Connecting to WiFi network");
-    let wifi_connect_result = connect_to_wifi(
-        spawner,
-        peripherals.TIMG0,
-        peripherals.WIFI,
-        peripherals.RADIO_CLK,
-        rng,
-    )
-    .await;
+    let ssid_result = String::<32>::try_from(WIFI_SSID);
+    let password_result = String::<64>::try_from(WIFI_PASSWORD);
 
-    if wifi_connect_result.is_err() {
-        error!(
-            "Failed to connect to WiFi: {:?}",
-            wifi_connect_result.err().unwrap()
+    if ssid_result.is_err() || password_result.is_err() {
+        error!("No valid Wifi SSID or password provided");
+        enter_deep_sleep(
+            peripherals.LPWR,
+            hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
         );
     } else {
-        let (mut wifi_guard, stack) = wifi_connect_result.unwrap();
+        let ssid = ssid_result.unwrap();
+        let password = password_result.unwrap();
 
-        match send_logs_to_server(stack).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Failed to send the logs to the server: {e:?}");
-            }
-        };
-
-        // Get duration for operations
-        let current_time = now();
-        let wifi_start_time_in_micro_seconds = current_time
-            .checked_duration_since(start_time)
-            .unwrap()
-            .to_micros();
-
-        if let Err(e) = send_timing_data(stack, boot_count).await {
-            error!("Failed to send timing data: {e:?}");
-            // Continue execution even if timing data fails, as we can still try to send sensor data
-        }
-        match send_logs_to_server(stack).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Failed to send the logs to the server: {e:?}");
-            }
-        };
-
-        let sensor_read_result = read_sensor_data(SensorPeripherals {
-            sda: peripherals.GPIO10,
-            scl: peripherals.GPIO11,
-            pressure_sensor_enable: peripherals.GPIO18,
-            i2c0: peripherals.I2C0,
+        info!("Connecting to WiFi network");
+        let wifi_connect_result = wifi::connect_to_wifi(
+            spawner,
+            peripherals.TIMG0,
+            peripherals.WIFI,
+            peripherals.RADIO_CLK,
             rng,
-        })
+            ssid,
+            password,
+        )
         .await;
 
-        if sensor_read_result.is_err() {
-            error!("Failed to send the logs to the server");
+        if wifi_connect_result.is_err() {
+            error!(
+                "Failed to connect to WiFi: {:?}",
+                wifi_connect_result.err().unwrap()
+            );
         } else {
-            let (bme280_reading, ads1115_reading) = sensor_read_result.unwrap();
+            let (mut wifi_controller, stack) = wifi_connect_result.unwrap();
 
             match send_logs_to_server(stack).await {
                 Ok(_) => (),
@@ -261,42 +198,87 @@ async fn main_fallible(spawner: Spawner, mut peripherals: Peripherals, boot_coun
                 }
             };
 
-            let _ = send_metrics_to_server(
-                stack,
-                bme280_reading,
-                ads1115_reading,
-                boot_count,
-                start_time,
-                wifi_start_time_in_micro_seconds,
-            )
-            .await;
-        }
+            // Get duration for operations
+            let current_time = now();
+            let wifi_start_time_in_micro_seconds = current_time
+                .checked_duration_since(start_time)
+                .unwrap()
+                .to_micros();
 
-        // Prepare to shut down. Turn off the logger
-        info!(
-            "Entering deep sleep for {}s",
-            DEEP_SLEEP_DURATION_IN_SECONDS,
-        );
-
-        match send_logs_to_server(stack).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Failed to send the logs to the server: {e:?}");
+            if let Err(e) = send_timing_data(stack, boot_count).await {
+                error!("Failed to send timing data: {e:?}");
+                // Continue execution even if timing data fails, as we can still try to send sensor data
             }
-        };
+            match send_logs_to_server(stack).await {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Failed to send the logs to the server: {e:?}");
+                }
+            };
 
-        // Ensure WiFi is disconnected properly
-        if let Ok(is_connected) = wifi_guard.is_connected() {
-            if is_connected {
-                if let Err(e) = wifi_guard.disconnect() {
-                    error!("Failed to disconnect WiFi: {e:?}");
+            let sensor_read_result = read_sensor_data(SensorPeripherals {
+                sda: peripherals.GPIO10,
+                scl: peripherals.GPIO11,
+                pressure_sensor_enable: peripherals.GPIO18,
+                i2c0: peripherals.I2C0,
+                rng,
+            })
+            .await;
+
+            if sensor_read_result.is_err() {
+                error!("Failed to send the logs to the server");
+            } else {
+                let (bme280_reading, ads1115_reading) = sensor_read_result.unwrap();
+
+                match send_logs_to_server(stack).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        error!("Failed to send the logs to the server: {e:?}");
+                    }
+                };
+
+                let _ = send_metrics_to_server(
+                    stack,
+                    bme280_reading,
+                    ads1115_reading,
+                    boot_count,
+                    start_time,
+                    wifi_start_time_in_micro_seconds,
+                )
+                .await;
+            }
+
+            // Prepare to shut down. Turn off the logger
+            info!(
+                "Entering deep sleep for {}s",
+                DEEP_SLEEP_DURATION_IN_SECONDS,
+            );
+
+            match send_logs_to_server(stack).await {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Failed to send the logs to the server: {e:?}");
+                }
+            };
+
+            // Ensure WiFi is disconnected properly before device state transition
+            let wifi_disconnect_result = wifi::disconnect_from_wifi(&mut wifi_controller).await;
+            match wifi_disconnect_result {
+                Ok(_) => {
+                    info!("WiFi disconnected successfully, entering deep sleep");
+                    enter_deep_sleep(
+                        peripherals.LPWR,
+                        hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to disconnect WiFi, performing software reset: {e}");
+                    software_reset();
                 }
             }
         }
     }
 
-    enter_deep_sleep(
-        peripherals.LPWR,
-        hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
-    );
+    // This is unreachable as both deep_sleep and software_reset never return
+    unreachable!("Device should have entered deep sleep or reset");
 }

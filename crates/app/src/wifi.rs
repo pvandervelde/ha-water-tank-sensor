@@ -49,6 +49,12 @@ use rand_core::RngCore as _;
 
 use crate::RngWrapper;
 
+const MAX_DISCONNECT_RETRIES: u8 = 3;
+const DISCONNECT_RETRY_DELAY_MS: u64 = 100;
+
+const WIFI_RECONNECT_ATTEMPTS: u8 = 3;
+const WIFI_RECONNECT_DELAY_MS: u64 = 100;
+
 /// Static cell for network stack resources
 static STACK_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
 
@@ -57,7 +63,11 @@ static WIFI_CONTROLLER: StaticCell<EspWifiController<'static>> = StaticCell::new
 
 /// Error within WiFi connection
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum WifiConnectionError {
+    /// Error when connecting to the Wifi
+    #[error("Failed to connect to the Wifi.")]
+    WifiConnectionFailed,
+
     /// Error during WiFi initialization
     #[error("Failed to initialize the Wifi.")]
     WifiInitialization(WifiInitializationError),
@@ -71,27 +81,129 @@ pub enum Error {
     NetworkTaskSpawnFailed,
 }
 
-impl From<WifiInitializationError> for Error {
+#[derive(Debug, thiserror::Error)]
+pub enum WifiDisconnectError {
+    #[error("Failed to check WiFi connection status")]
+    ConnectionCheck,
+
+    #[error("Failed to disconnect from WiFi")]
+    Disconnect,
+
+    #[error("WiFi disconnect verification failed after {attempts} attempts")]
+    Verification { attempts: u8 },
+}
+
+impl From<WifiInitializationError> for WifiConnectionError {
     fn from(error: WifiInitializationError) -> Self {
         Self::WifiInitialization(error)
     }
 }
 
-impl From<EspWifiError> for Error {
+impl From<EspWifiError> for WifiConnectionError {
     fn from(error: EspWifiError) -> Self {
         Self::Wifi(error)
     }
 }
 
-/// Connect to WiFi
-pub async fn connect<'a>(
+pub async fn connect_to_wifi<'a>(
     spawner: Spawner,
+    timg0: TIMG0,
+    wifi: WIFI,
+    radio_clk: RADIO_CLK,
+    rng: Rng,
+    ssid: String<32>,
+    password: String<64>,
+) -> Result<(WifiController<'a>, Stack<'a>), WifiConnectionError> {
+    info!("Connecting to WiFi");
+    let timg0 = TimerGroup::new(timg0);
+
+    let (mut controller, stack, runner) =
+        match create_controller_and_stack(timg0, rng, wifi, radio_clk).await {
+            Ok(tuple) => tuple,
+            Err(_) => return Err(WifiConnectionError::WifiConnectionFailed),
+        };
+
+    if let Err(e) = spawner.spawn(wifi_management_task(runner)) {
+        error!("Failed to spawn network task: {e:?}");
+        return Err(WifiConnectionError::NetworkTaskSpawnFailed);
+    }
+
+    let mut attempts = 0;
+    while attempts < WIFI_RECONNECT_ATTEMPTS {
+        match connect_to_network(&mut controller, ssid.clone(), password.clone()).await {
+            Ok(()) => (),
+            Err(e) => {
+                error!(
+                    "WiFi connection attempt {}/{} failed: {e:?}",
+                    attempts + 1,
+                    WIFI_RECONNECT_ATTEMPTS
+                );
+            }
+        }
+
+        debug!("Wait for network link");
+        loop {
+            if stack.is_link_up() {
+                break;
+            }
+            Timer::after(Duration::from_millis(500)).await;
+        }
+
+        debug!("Wait for IP address");
+        loop {
+            if let Some(config) = stack.config_v4() {
+                info!("Connected to WiFi with IP address {}", config.address);
+                break;
+            }
+            Timer::after(Duration::from_millis(500)).await;
+        }
+
+        // Verify connection is stable
+        Timer::after(Duration::from_millis(WIFI_RECONNECT_DELAY_MS)).await;
+        match controller.is_connected() {
+            Ok(true) => {
+                info!("WiFi connection established and stable");
+                return Ok((controller, stack));
+            }
+            Ok(false) => {
+                error!(
+                    "WiFi connection attempt {}/{} failed. Failed to establish a stable connection.",
+                    attempts + 1,
+                    WIFI_RECONNECT_ATTEMPTS
+                );
+            }
+            Err(e) => {
+                error!(
+                    "WiFi connection attempt {}/{} failed: {e:?}",
+                    attempts + 1,
+                    WIFI_RECONNECT_ATTEMPTS
+                );
+            }
+        }
+
+        attempts += 1;
+        if attempts < WIFI_RECONNECT_ATTEMPTS {
+            Timer::after(Duration::from_millis(WIFI_RECONNECT_DELAY_MS)).await;
+        }
+    }
+
+    Err(WifiConnectionError::WifiConnectionFailed)
+}
+
+/// Connect to WiFi
+async fn create_controller_and_stack<'a>(
     timg0: TimerGroup<TIMG0>,
     rng: Rng,
     wifi: WIFI,
     radio_clock_control: RADIO_CLK,
-    (ssid, password): (String<32>, String<64>),
-) -> Result<(WifiController<'a>, Stack<'a>), Error> {
+) -> Result<
+    (
+        WifiController<'a>,
+        Stack<'a>,
+        Runner<'a, WifiDevice<'a, WifiStaDevice>>,
+    ),
+    WifiConnectionError,
+> {
     let mut rng_wrapper = RngWrapper::from(rng);
     let seed = rng_wrapper.next_u64();
     debug!("Use random seed 0x{seed:016x}");
@@ -99,8 +211,7 @@ pub async fn connect<'a>(
     let wifi_controller = initialize_wifi(timg0.timer0, rng, radio_clock_control)?;
     let wifi_controller: &'static mut _ = WIFI_CONTROLLER.init(wifi_controller);
 
-    let (wifi_interface, mut controller) =
-        new_wifi_with_mode(wifi_controller, wifi, WifiStaDevice)?;
+    let (wifi_interface, controller) = new_wifi_with_mode(wifi_controller, wifi, WifiStaDevice)?;
 
     let config = Config::dhcpv4(DhcpConfig::default());
 
@@ -108,38 +219,15 @@ pub async fn connect<'a>(
     let stack_resources: &'static mut _ = STACK_RESOURCES.init(StackResources::new());
     let (stack, runner) = new_network_stack(wifi_interface, config, stack_resources, seed);
 
-    connection_fallible(&mut controller, ssid, password).await?;
-    if let Err(e) = spawner.spawn(net_task(runner)) {
-        error!("Failed to spawn network task: {e:?}");
-        return Err(Error::NetworkTaskSpawnFailed);
-    }
-
-    debug!("Wait for network link");
-    loop {
-        if stack.is_link_up() {
-            break;
-        }
-        Timer::after(Duration::from_millis(500)).await;
-    }
-
-    debug!("Wait for IP address");
-    loop {
-        if let Some(config) = stack.config_v4() {
-            info!("Connected to WiFi with IP address {}", config.address);
-            break;
-        }
-        Timer::after(Duration::from_millis(500)).await;
-    }
-
-    Ok((controller, stack))
+    Ok((controller, stack, runner))
 }
 
 /// Fallible task for WiFi connection
-async fn connection_fallible(
+async fn connect_to_network(
     controller: &mut WifiController<'_>,
     ssid: String<32>,
     password: String<64>,
-) -> Result<(), Error> {
+) -> Result<(), WifiConnectionError> {
     debug!("Start connection");
     debug!("Device capabilities: {:?}", controller.capabilities());
     loop {
@@ -179,8 +267,78 @@ async fn connection_fallible(
     Ok(())
 }
 
+pub async fn disconnect_from_wifi(
+    wifi_controller: &mut WifiController<'_>,
+) -> Result<(), WifiDisconnectError> {
+    let mut retries = 0;
+    while retries < MAX_DISCONNECT_RETRIES {
+        match wifi_controller.is_connected() {
+            Ok(is_connected) => {
+                if !is_connected {
+                    info!("WiFi already disconnected");
+                    return Ok(());
+                }
+
+                debug!("Disconnecting from Wifi ...");
+                match wifi_controller.disconnect() {
+                    Ok(_) => {
+                        // Wait briefly to ensure disconnection completes
+                        Timer::after(Duration::from_millis(DISCONNECT_RETRY_DELAY_MS)).await;
+
+                        // Verify disconnection
+                        match wifi_controller.is_connected() {
+                            Ok(still_connected) => {
+                                if !still_connected {
+                                    info!("WiFi successfully disconnected");
+                                    return Ok(());
+                                }
+                            }
+                            Err(e) => match e {
+                                EspWifiError::Disconnected => return Ok(()),
+                                _ => error!(
+                                    "Failed to disconnect WiFi (attempt {}/{}): {e:?}",
+                                    retries + 1,
+                                    MAX_DISCONNECT_RETRIES
+                                ),
+                            },
+                        }
+                    }
+                    Err(e) => {
+                        match e {
+                            EspWifiError::Disconnected => return Ok(()),
+                            _ => error!(
+                                "Failed to disconnect WiFi (attempt {}/{}): {e:?}",
+                                retries + 1,
+                                MAX_DISCONNECT_RETRIES
+                            ),
+                        }
+
+                        if retries == MAX_DISCONNECT_RETRIES - 1 {
+                            return Err(WifiDisconnectError::Disconnect);
+                        }
+                    }
+                }
+            }
+            Err(e) => match e {
+                EspWifiError::Disconnected => return Ok(()),
+                _ => error!("Failed to check WiFi connection status: {e:?}"),
+            },
+        }
+
+        retries += 1;
+        if retries < MAX_DISCONNECT_RETRIES {
+            Timer::after(Duration::from_millis(DISCONNECT_RETRY_DELAY_MS)).await;
+        }
+    }
+
+    Err(WifiDisconnectError::Verification {
+        attempts: MAX_DISCONNECT_RETRIES,
+    })
+}
+
 /// Task for ongoing network processing
 #[embassy_executor::task]
-async fn net_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) {
+async fn wifi_management_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) {
+    debug!("Starting wifi background runner ..");
     runner.run().await;
 }
