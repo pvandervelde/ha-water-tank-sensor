@@ -33,8 +33,6 @@ use log::error;
 use log::info;
 use log::warn;
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embassy_time::{Delay, Duration};
 
@@ -78,7 +76,7 @@ const EXPECTED_PRESSURE_SENSOR_VOLTAGE: f32 = 24.0;
 
 /// Error within sensor sampling
 #[derive(Debug, Error)]
-enum SensorError {
+pub enum SensorError {
     /// Error from domain
     #[error("There was an error from the domain")]
     Domain(DomainError),
@@ -95,12 +93,6 @@ enum SensorError {
 
     #[error("Failed to initialize I2C")]
     I2cInitializationFailed,
-
-    #[error("Failed to read BME280 sensor")]
-    Bme280ReadFailed,
-
-    #[error("Failed to read ADS1115 sensor")]
-    Ads1115ReadFailed,
 }
 
 impl From<DomainError> for SensorError {
@@ -338,11 +330,11 @@ async fn read_bme280(
     Ok(final_data)
 }
 
-#[embassy_executor::task]
-pub async fn read_sensor_data_task(
+pub async fn read_sensor_data(
     peripherals: SensorPeripherals,
-    sender: Sender<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
-) {
+) -> Result<(Bme280Data, Ads1115Data), SensorError> {
+    info!("Reading data from sensors ...");
+
     info!("Create I²C bus for the BME280");
     let i2c_config = I2cConfig::default().with_frequency(25_u32.kHz());
     let i2c_result = I2c::new(peripherals.i2c0, i2c_config);
@@ -351,7 +343,7 @@ pub async fn read_sensor_data_task(
         Ok(r) => r,
         Err(e) => {
             error!("Failed to initialize I2C: {e:?}");
-            return;
+            return Err(SensorError::I2cInitializationFailed);
         }
     };
 
@@ -366,10 +358,12 @@ pub async fn read_sensor_data_task(
     let bme280_data = match read_bme280(&mut bme280_sensor, &mut rng).await {
         Ok(data) => data,
         Err(e) => {
+            let _ = bme280_sensor.release();
             error!("Failed to read BME280 sensor: {e:?}");
-            return;
+            return Err(e);
         }
     };
+
     i2c = bme280_sensor.release();
 
     // power up the pressure sensor
@@ -383,7 +377,7 @@ pub async fn read_sensor_data_task(
             error!("Failed to read ADS1115 sensor: {e:?}");
             // Ensure we shut down the pressure sensor even on error
             driver.set_low();
-            return;
+            return Err(e);
         }
     };
 
@@ -393,7 +387,7 @@ pub async fn read_sensor_data_task(
     let _ = ads1115_sensor.destroy_ads1115();
 
     // Only send data if both sensors read successfully
-    sender.send((bme280_data, ads1115_data)).await;
+    Ok((bme280_data, ads1115_data))
 }
 
 async fn sample_voltage_data(adc: &mut Adc<'_>) -> Result<Ads1115Data, SensorError> {

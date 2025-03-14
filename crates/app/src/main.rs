@@ -8,24 +8,15 @@ extern crate alloc;
 use core::convert::Infallible;
 
 use embassy_net::Stack;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
 use esp_hal::peripherals::Peripherals;
 use esp_hal::ram;
 use esp_hal::time::now;
-use esp_hal::time::Instant;
 use esp_hal_embassy::main;
 use esp_wifi::wifi::WifiController;
 use log::error;
 use log::info;
 
 use embassy_executor::Spawner;
-
-use embassy_time::Timer;
-
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::channel::Channel;
-use embassy_sync::channel::Sender;
 
 use esp_alloc as _;
 
@@ -41,6 +32,7 @@ use esp_hal::Config as EspConfig;
 
 use esp_hal_embassy::init as initialize_embassy;
 
+use logging::send_logs_to_server;
 use scopeguard::guard;
 use scopeguard::ScopeGuard;
 use thiserror::Error;
@@ -49,20 +41,18 @@ use heapless::String;
 
 use esp_backtrace as _;
 
-use static_cell::StaticCell;
-
 mod board_components;
 
 mod cell;
 use self::cell::SyncUnsafeCell;
 
 mod data_recording;
-use self::data_recording::update_task as send_data_task;
+use self::data_recording::send_metrics_to_server;
 
 mod device_meta;
 
 mod logging;
-use self::logging::setup as setup_logging;
+use self::logging::setup_logger as setup_logging;
 
 mod meta;
 
@@ -70,11 +60,10 @@ mod random;
 use self::random::RngWrapper;
 
 mod sensor;
-use self::sensor::read_sensor_data_task;
+use self::sensor::read_sensor_data;
 use self::sensor::SensorPeripherals;
 
 mod sensor_data;
-use sensor_data::{Ads1115Data, Bme280Data};
 
 mod sleep;
 use self::sleep::enter_deep as enter_deep_sleep;
@@ -88,9 +77,6 @@ use self::wifi::Error as WifiError;
 /// Duration of deep sleep
 const DEEP_SLEEP_DURATION_IN_SECONDS: u32 = 30;
 
-/// Period to wait after the data has been sent, before going to deep sleep
-const WAIT_AFTER_SENT_PERIOD_IN_SECONDS: u64 = 5;
-
 /// SSID for WiFi network
 const WIFI_SSID: &str = env!("WIFI_SSID");
 
@@ -99,18 +85,6 @@ const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 
 /// Size of heap for dynamically-allocated memory
 const HEAP_MEMORY_SIZE: usize = 72 * 1024;
-
-/// A channel between all the data processors and the main function. Used to let
-/// the main function know when the work is done.
-static DATA_SEND_CHANNEL: StaticCell<Channel<NoopRawMutex, bool, 3>> = StaticCell::new();
-
-/// A channel between the sensors and data processor
-static SENSOR_CHANNEL: StaticCell<Channel<NoopRawMutex, (Bme280Data, Ads1115Data), 3>> =
-    StaticCell::new();
-
-/// A channel to provide the Wifi stack to all parts that need one. Note that
-/// Stack instances are 'Copy' so we can send them around to everyone.
-static WIFI_STACK_CHANNEL: StaticCell<Channel<NoopRawMutex, Stack, 1>> = StaticCell::new();
 
 /// Stored boot count between deep sleep cycles
 ///
@@ -139,18 +113,6 @@ enum Error {
         #[from]
         source: WifiError,
     },
-
-    /// Failed to spawn task
-    #[error("Failed to spawn task")]
-    FailedToSpawnTask,
-
-    /// Failed to send network stack
-    #[error("Failed to send network stack")]
-    NetworkStackSendFailed,
-
-    /// Failed to process data
-    #[error("Failed to process data")]
-    DataProcessingFailed,
 }
 
 async fn connect_to_wifi<'a>(
@@ -212,11 +174,7 @@ async fn main(spawner: Spawner) {
     info!("Current boot count = {boot_count}");
     *boot_count += 1;
 
-    let wifi_provider_channel: &'static mut _ = WIFI_STACK_CHANNEL.init(Channel::new());
-    let wifi_receiver = wifi_provider_channel.receiver();
-    let wifi_sender = wifi_provider_channel.sender();
-
-    let logger_result = setup_logging(spawner, wifi_receiver, *boot_count);
+    let logger_result = setup_logging(*boot_count);
     if logger_result.is_err() {
         // Everything is stuffed. Just go back to sleep
         enter_deep_sleep(
@@ -225,58 +183,42 @@ async fn main(spawner: Spawner) {
         );
     }
 
-    if let Err(error) = main_fallible(
-        spawner,
-        peripherals,
-        wifi_sender,
-        logger_result.unwrap(),
-        *boot_count,
-    )
-    .await
-    {
-        error!("Error while running firmware: {error:?}");
-    }
+    main_fallible(spawner, peripherals, *boot_count).await;
 }
 
 /// Main task that can return an error
-async fn main_fallible(
-    spawner: Spawner,
-    mut peripherals: Peripherals,
-    wifi_stack_sender: Sender<'static, NoopRawMutex, Stack<'static>, 1>,
-    logger_signals: (
-        &'static Signal<CriticalSectionRawMutex, bool>,
-        &'static Signal<CriticalSectionRawMutex, bool>,
-    ),
-    boot_count: u32,
-) -> Result<(), Error> {
+async fn main_fallible(spawner: Spawner, mut peripherals: Peripherals, boot_count: u32) -> ! {
     init_heap();
 
-    let (logger_shutdown_request_signal, logger_shutdown_complete_signal) = logger_signals;
-
     let start_time = now();
-    {
-        let systimer = SystemTimer::new(peripherals.SYSTIMER);
-        initialize_embassy(systimer.alarm0);
+    let systimer = SystemTimer::new(peripherals.SYSTIMER);
+    initialize_embassy(systimer.alarm0);
 
-        let rng = Rng::new(&mut peripherals.RNG);
+    let rng = Rng::new(&mut peripherals.RNG);
 
-        // Connect to WiFi and get network stack
-        info!("Connecting to WiFi network");
-        let (mut wifi_guard, stack) = match connect_to_wifi(
-            spawner,
-            peripherals.TIMG0,
-            peripherals.WIFI,
-            peripherals.RADIO_CLK,
-            rng,
-        )
-        .await
-        {
-            Ok((guard, stack)) => (guard, stack),
+    // Connect to WiFi and get network stack
+    info!("Connecting to WiFi network");
+    let wifi_connect_result = connect_to_wifi(
+        spawner,
+        peripherals.TIMG0,
+        peripherals.WIFI,
+        peripherals.RADIO_CLK,
+        rng,
+    )
+    .await;
+
+    if wifi_connect_result.is_err() {
+        error!(
+            "Failed to connect to WiFi: {:?}",
+            wifi_connect_result.err().unwrap()
+        );
+    } else {
+        let (mut wifi_guard, stack) = wifi_connect_result.unwrap();
+
+        match send_logs_to_server(stack).await {
+            Ok(_) => (),
             Err(e) => {
-                error!("Failed to connect to WiFi: {e:?}");
-                // Signal logger to shut down before returning
-                logger_shutdown_request_signal.signal(true);
-                return Err(e);
+                error!("Failed to send the logs to the server: {e:?}");
             }
         };
 
@@ -291,61 +233,44 @@ async fn main_fallible(
             error!("Failed to send timing data: {e:?}");
             // Continue execution even if timing data fails, as we can still try to send sensor data
         }
-
-        // Send network stack to provider
-        wifi_stack_sender.send(stack).await;
-
-        let data_sent_channel: &'static mut _ = DATA_SEND_CHANNEL.init(Channel::new());
-        let data_sent_receiver = data_sent_channel.receiver();
-        let data_sent_sender = data_sent_channel.sender();
-
-        info!("Setup data sending task");
-        let sensor_data_sender = match setup_data_transmitting_task(
-            spawner,
-            stack,
-            data_sent_sender,
-            boot_count,
-            start_time,
-            wifi_start_time_in_micro_seconds,
-        ) {
-            Ok(sender) => sender,
+        match send_logs_to_server(stack).await {
+            Ok(_) => (),
             Err(e) => {
-                error!("Failed to setup data transmitting task: {e:?}");
-                logger_shutdown_request_signal.signal(true);
-                return Err(e);
+                error!("Failed to send the logs to the server: {e:?}");
             }
         };
 
-        info!("Setup environment sensor task");
-        if let Err(e) = setup_sensor_task(
-            spawner,
-            SensorPeripherals {
-                sda: peripherals.GPIO10,
-                scl: peripherals.GPIO11,
-                pressure_sensor_enable: peripherals.GPIO18,
-                i2c0: peripherals.I2C0,
-                rng,
-            },
-            sensor_data_sender,
-        ) {
-            error!("Failed to setup sensor task: {e:?}");
-            logger_shutdown_request_signal.signal(true);
-            return Err(e);
-        }
-
-        info!("Waiting for sensors to complete tasks");
-        let was_processed = data_sent_receiver.receive().await;
-        if !was_processed {
-            error!("Failed to process the data");
-            logger_shutdown_request_signal.signal(true);
-            return Err(Error::DataProcessingFailed);
-        }
-
-        info!("Wait for {}s", WAIT_AFTER_SENT_PERIOD_IN_SECONDS);
-        Timer::after(embassy_time::Duration::from_secs(
-            WAIT_AFTER_SENT_PERIOD_IN_SECONDS,
-        ))
+        let sensor_read_result = read_sensor_data(SensorPeripherals {
+            sda: peripherals.GPIO10,
+            scl: peripherals.GPIO11,
+            pressure_sensor_enable: peripherals.GPIO18,
+            i2c0: peripherals.I2C0,
+            rng,
+        })
         .await;
+
+        if sensor_read_result.is_err() {
+            error!("Failed to send the logs to the server");
+        } else {
+            let (bme280_reading, ads1115_reading) = sensor_read_result.unwrap();
+
+            match send_logs_to_server(stack).await {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Failed to send the logs to the server: {e:?}");
+                }
+            };
+
+            let _ = send_metrics_to_server(
+                stack,
+                bme280_reading,
+                ads1115_reading,
+                boot_count,
+                start_time,
+                wifi_start_time_in_micro_seconds,
+            )
+            .await;
+        }
 
         // Prepare to shut down. Turn off the logger
         info!(
@@ -353,9 +278,12 @@ async fn main_fallible(
             DEEP_SLEEP_DURATION_IN_SECONDS,
         );
 
-        logger_shutdown_request_signal.signal(true);
-
-        let _logger_is_done = logger_shutdown_complete_signal.wait().await;
+        match send_logs_to_server(stack).await {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Failed to send the logs to the server: {e:?}");
+            }
+        };
 
         // Ensure WiFi is disconnected properly
         if let Ok(is_connected) = wifi_guard.is_connected() {
@@ -371,48 +299,4 @@ async fn main_fallible(
         peripherals.LPWR,
         hifitime::Duration::from_seconds(DEEP_SLEEP_DURATION_IN_SECONDS as f64),
     );
-    //Ok(())
-}
-
-fn setup_data_transmitting_task(
-    spawner: Spawner,
-    stack: Stack<'static>,
-    data_sent_sender: Sender<'static, NoopRawMutex, bool, 3>,
-    boot_count: u32,
-    system_start_time: Instant,
-    wifi_start_time_in_micro_seconds: u64,
-) -> Result<Sender<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>, Error> {
-    info!("Create channel");
-    let sensor_channel: &'static mut _ = SENSOR_CHANNEL.init(Channel::new());
-    let sensor_receiver = sensor_channel.receiver();
-    let sensor_sender = sensor_channel.sender();
-
-    info!("Spawning data sending task");
-    if let Err(e) = spawner.spawn(send_data_task(
-        stack,
-        sensor_receiver,
-        data_sent_sender,
-        boot_count,
-        system_start_time,
-        wifi_start_time_in_micro_seconds,
-    )) {
-        error!("Failed to spawn data sending task: {e:?}");
-        return Err(Error::FailedToSpawnTask);
-    }
-
-    Ok(sensor_sender)
-}
-
-/// Setup sensor task
-fn setup_sensor_task(
-    spawner: Spawner,
-    peripherals: SensorPeripherals,
-    sender: Sender<'static, NoopRawMutex, (Bme280Data, Ads1115Data), 3>,
-) -> Result<(), Error> {
-    info!("Spawning environmental sensor task");
-    if let Err(e) = spawner.spawn(read_sensor_data_task(peripherals, sender)) {
-        error!("Failed to spawn sensor task: {e:?}");
-        return Err(Error::FailedToSpawnTask);
-    }
-    Ok(())
 }
