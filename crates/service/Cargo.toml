@@ -35,7 +35,7 @@ tokio = { version = "1.43.0", features = ["full", "tracing"] }
 tokio-rustls = "0.26.1"
 tower-http = { version = "0.6.2", features = ["trace"] }
 tracing = { version = "0.1.41", features = ["log"] }
-tracing-opentelemetry = "0.28.0"
+tracing-opentelemetry = "0.29.0"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 uom = "0.36.0"
 url = "2.5.4"
