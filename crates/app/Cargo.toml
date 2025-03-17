@@ -60,7 +60,7 @@ embedded-hal-bus = { version = "0.3", default-features = false, features = [
 embedded-io-async = { version = "0.6", default-features = false }
 
 # esp32
-esp-alloc = "0.6.0"
+esp-alloc = "0.7.0"
 esp-backtrace = { version = "0.15.1", features = [
     "esp32c6",
     "exception-handler",
