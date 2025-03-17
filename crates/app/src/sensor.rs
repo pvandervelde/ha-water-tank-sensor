@@ -432,7 +432,7 @@ async fn sample_voltage_data(adc: &mut Adc<'_>) -> Result<Ads1115Data, SensorErr
     };
 
     debug!(
-        " ┣ Enclosure brightness:    {:.2} V",
+        " ┣ Enclosure brightness:    {:.2} %",
         sample.enclosure_relative_brightness.get::<percent>()
     );
 
