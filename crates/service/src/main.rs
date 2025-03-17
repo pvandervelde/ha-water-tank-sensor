@@ -58,6 +58,7 @@ struct SensorData {
     temperature_in_celcius: f32,
     humidity_in_percent: f32,
     pressure_in_pascal: f32,
+    brightness_in_percent: f32,
     battery_voltage: f32,
     pressure_sensor_voltage: f32,
     tank_level_in_meters: f32,
@@ -88,6 +89,10 @@ impl SensorData {
 
         if self.pressure_in_pascal < 50.0e3 || self.pressure_in_pascal > 150.0e3 {
             return Err("Pressure out of reasonable range (500-1500 hPa)".to_string());
+        }
+
+        if self.brightness_in_percent < 0.0 || self.brightness_in_percent > 100.0 {
+            return Err("Enclosure brightness must be bewteen 0% and 100%".to_string());
         }
 
         if self.battery_voltage < 0.0 || self.battery_voltage > 15.0 {

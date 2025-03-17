@@ -50,6 +50,7 @@ fn format_metrics(
     let humidity = bme280_data.humidity;
     let air_pressure = bme280_data.pressure;
 
+    let brightness = ads1115_data.enclosure_relative_brightness;
     let battery_voltage = ads1115_data.battery_voltage;
     let pressure_sensor_voltage = ads1115_data.pressure_sensor_voltage;
     let liquid_height = ads1115_data.height_above_sensor;
@@ -60,7 +61,7 @@ fn format_metrics(
 
     writeln!(
         buffer,
-        "{{\"device_id\":\"{device_id}\",\"firmware_version\":\"{firmware_version}\",\"boot_count\":{boot_count},\"run_time_in_seconds\":{run_time:.3},\"wifi_start_time_in_seconds\":{wifi_start_time:.3},\"temperature_in_celcius\":{temperature:.2},\"humidity_in_percent\":{humidity:.2},\"pressure_in_pascal\":{pressure:.1},\"battery_voltage\":{battery_voltage:.3},\"pressure_sensor_voltage\":{pressure_sensor_voltage:.3},\"tank_level_in_meters\":{tank_level:.3},\"tank_temperature_in_celcius\":{tank_temperature:.2}}}",
+        "{{\"device_id\":\"{device_id}\",\"firmware_version\":\"{firmware_version}\",\"boot_count\":{boot_count},\"run_time_in_seconds\":{run_time:.3},\"wifi_start_time_in_seconds\":{wifi_start_time:.3},\"temperature_in_celcius\":{temperature:.2},\"humidity_in_percent\":{humidity:.2},\"pressure_in_pascal\":{pressure:.1},\"brightness_in_percent\":{brightness:.3},\"battery_voltage\":{battery_voltage:.3},\"pressure_sensor_voltage\":{pressure_sensor_voltage:.3},\"tank_level_in_meters\":{tank_level:.3},\"tank_temperature_in_celcius\":{tank_temperature:.2}}}",
         device_id=DEVICE_LOCATION,
         firmware_version=CARGO_PKG_VERSION.unwrap_or("NOT FOUND"),
         boot_count=boot_count,
@@ -69,6 +70,7 @@ fn format_metrics(
         temperature=temperature.get::<degree_celsius>(),
         humidity=humidity.get::<percent>(),
         pressure=air_pressure.get::<pascal>(),
+        brightness=brightness.get::<percent>(),
         battery_voltage=battery_voltage.get::<volt>(),
         pressure_sensor_voltage=pressure_sensor_voltage.get::<volt>(),
         tank_level=liquid_height.get::<meter>(),
