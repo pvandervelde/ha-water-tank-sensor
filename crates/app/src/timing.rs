@@ -3,6 +3,7 @@ use core::fmt::Write;
 use embassy_net::tcp::client::TcpClientState;
 use embassy_net::Stack;
 use embassy_net::{dns::DnsSocket, tcp::client::TcpClient};
+use embassy_time::Duration;
 use esp_hal::time::now;
 use heapless::String;
 use log::{debug, error};
@@ -11,6 +12,7 @@ use reqwless::{headers::ContentType, request::RequestBuilder};
 use thiserror::Error;
 
 use crate::device_meta::DEVICE_LOCATION;
+use crate::wifi::DEFAULT_TCP_TIMEOUT_IN_MILLISECONDS;
 
 const METRICS_URL: &str = env!("METRICS_URL");
 
@@ -48,7 +50,10 @@ pub async fn send_timing_data(stack: Stack<'_>, boot_count: u32) -> Result<(), E
 
     let dns_socket = DnsSocket::new(stack);
     let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
-    let tcp_client = TcpClient::new(stack, &tcp_client_state);
+    let mut tcp_client = TcpClient::new(stack, &tcp_client_state);
+    tcp_client.set_timeout(Some(Duration::from_millis(
+        DEFAULT_TCP_TIMEOUT_IN_MILLISECONDS,
+    )));
 
     debug!("Creating HTTP client...");
     let mut client = HttpClient::new(&tcp_client, &dns_socket);

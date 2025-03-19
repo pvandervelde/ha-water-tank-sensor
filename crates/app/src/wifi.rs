@@ -63,6 +63,8 @@ const WIFI_CHECK_INTERVAL_MS: u64 = 50;
 /// Maximum number of consecutive connection failures before giving up
 const MAX_CONSECUTIVE_FAILURES: u8 = 2;
 
+pub const DEFAULT_TCP_TIMEOUT_IN_MILLISECONDS: u64 = 5000;
+
 /// Static cell for network stack resources
 static STACK_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
 
