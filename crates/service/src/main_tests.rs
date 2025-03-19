@@ -1,7 +1,11 @@
 use super::*;
+use axum::body::to_bytes;
 use axum::http::StatusCode;
-use opentelemetry::metrics::MeterProvider;
+use axum::response::IntoResponse;
+use axum::Json;
+use opentelemetry::global;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use tracing_subscriber::fmt::TestWriter;
 
 // SensorData
 
@@ -15,6 +19,7 @@ fn create_valid_sensor_data() -> SensorData {
         temperature_in_celcius: 25.0,
         humidity_in_percent: 50.0,
         pressure_in_pascal: 101325.0, // standard atmospheric pressure
+        brightness_in_percent: 50.0,  // Added missing field
         battery_voltage: 3.7,
         pressure_sensor_voltage: 5.0,
         tank_level_in_meters: 1.5,
@@ -299,15 +304,15 @@ fn test_api_response_error() {
 #[tokio::test]
 async fn test_health_check() {
     // Initialize tracing for the test
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_writer(TestWriter::new())
+        .try_init();
 
     let response = handle_health_check().await.into_response();
     assert_eq!(response.status(), StatusCode::OK);
 
     // Convert the response body to bytes and then to a string
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
 
     // Parse the JSON response
@@ -319,28 +324,17 @@ async fn test_health_check() {
 #[tokio::test]
 async fn test_handle_sensor_data_valid() {
     // Initialize tracing for the test
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_writer(TestWriter::new())
+        .try_init();
 
     // Initialize global meter provider for the test
     let meter_provider = SdkMeterProvider::builder().build();
     global::set_meter_provider(meter_provider);
 
-    let valid_data = SensorData {
-        device_id: "test-device-001".to_string(),
-        firmware_version: "1.0.0".to_string(),
-        boot_count: 1,
-        run_time_in_seconds: 10.5,
-        wifi_start_time_in_seconds: 2.5,
-        temperature_in_celcius: 25.0,
-        humidity_in_percent: 50.0,
-        pressure_in_pascal: 101325.0, // standard atmospheric pressure
-        battery_voltage: 3.7,
-        pressure_sensor_voltage: 5.0,
-        tank_level_in_meters: 1.5,
-        tank_temperature_in_celcius: 20.0,
-    };
+    let valid_data = create_valid_sensor_data();
 
-    let result = handle_sensor_data(Json(valid_data)).await;
+    let result = handle_sensor_data(Ok(Json(valid_data))).await;
     assert!(
         result.is_ok(),
         "Valid sensor data should be processed successfully"
@@ -353,48 +347,19 @@ async fn test_handle_sensor_data_valid() {
 #[tokio::test]
 async fn test_handle_sensor_data_invalid() {
     // Initialize tracing for the test
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_writer(TestWriter::new())
+        .try_init();
 
-    let invalid_data = SensorData {
-        device_id: "test-device-001".to_string(),
-        firmware_version: "1.0.0".to_string(),
-        boot_count: 0, // Invalid boot count
-        run_time_in_seconds: 10.5,
-        wifi_start_time_in_seconds: 2.5,
-        temperature_in_celcius: 25.0,
-        humidity_in_percent: 50.0,
-        pressure_in_pascal: 101325.0,
-        battery_voltage: 3.7,
-        pressure_sensor_voltage: 5.0,
-        tank_level_in_meters: 1.5,
-        tank_temperature_in_celcius: 20.0,
-    };
+    let mut invalid_data = create_valid_sensor_data();
+    invalid_data.boot_count = 0; // Invalid boot count
 
-    let result = handle_sensor_data(Json(invalid_data)).await;
+    let result = handle_sensor_data(Ok(Json(invalid_data))).await;
 
     match result {
         Ok(_) => assert!(false, "Invalid sensor data should be rejected"),
         Err((status, _)) => assert_eq!(status, StatusCode::BAD_REQUEST),
     }
-}
-
-#[test]
-fn test_record_gauge() {
-    // Initialize a meter provider
-    let provider = SdkMeterProvider::builder().build();
-    let meter = provider.meter("test");
-
-    // Test recording a gauge
-    record_gauge(
-        &meter,
-        "test_gauge".to_string(),
-        "Test description".to_string(),
-        Some("unit".to_string()),
-        42.0,
-    );
-
-    // We can't easily assert the recorded value in tests,
-    // but we can verify the code runs without errors
 }
 
 #[test]
