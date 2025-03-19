@@ -12,6 +12,10 @@ METRICS_URL = "https://metrics.example.com"
 WIFI_PASSWORD = "password-placeholder"
 WIFI_SSID = "ssid-placeholder"
 
+ESP_WIFI_CONFIG_COUNTRY_CODE = "NZ"
+ESP_WIFI_CONFIG_BEACON_TIMEOUT = "15"
+ESP_WIFI_CONFIG_AP_BEACON_TIMEOUT = "60"
+
 [build]
 rustflags = [
   "-C",
