@@ -4,6 +4,7 @@ use embassy_net::tcp::client::TcpClientState;
 use embassy_net::Stack;
 use embassy_net::{dns::DnsSocket, tcp::client::TcpClient};
 
+use embassy_time::Duration;
 use esp_hal::time::{now, Instant};
 use heapless::String;
 
@@ -23,6 +24,7 @@ use uom::si::{pressure::hectopascal, ratio::percent, thermodynamic_temperature::
 use crate::device_meta::DEVICE_LOCATION;
 use crate::meta::CARGO_PKG_VERSION;
 use crate::sensor_data::{Ads1115Data, Bme280Data};
+use crate::wifi::DEFAULT_TCP_TIMEOUT_IN_MILLISECONDS;
 
 const METRICS_URL: &str = env!("METRICS_URL");
 //const GRAFANA_USER_NAME: &str = env!("GRAFANA_USER_NAME");
@@ -138,7 +140,10 @@ pub async fn send_metrics_to_server(
     let dns_socket = DnsSocket::new(stack);
 
     let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
-    let tcp_client = TcpClient::new(stack, &tcp_client_state);
+    let mut tcp_client = TcpClient::new(stack, &tcp_client_state);
+    tcp_client.set_timeout(Some(Duration::from_millis(
+        DEFAULT_TCP_TIMEOUT_IN_MILLISECONDS,
+    )));
 
     debug!("Creating HTTP client ...");
     let mut client = HttpClient::new(&tcp_client, &dns_socket);
