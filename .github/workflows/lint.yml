@@ -25,7 +25,7 @@ jobs:
           target: ${{ matrix.items.target }}
           toolchain: stable
       - name: Enable caching
-        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
       - working-directory: ${{ matrix.items.path }}
         run: cargo check --target ${{ matrix.items.target }}
 
@@ -46,7 +46,7 @@ jobs:
           toolchain: stable
           components: rustfmt
       - name: Enable caching
-        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
       - name: Check formatting
         working-directory: ${{ matrix.items.path }}
         run: cargo fmt --all -- --check
@@ -69,7 +69,7 @@ jobs:
           toolchain: stable
           components: clippy
       - name: Enable caching
-        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2
       - name: Clippy Output
         working-directory: ${{ matrix.items.path }}
         run: cargo clippy --no-deps --all-features --target ${{ matrix.items.target }}
