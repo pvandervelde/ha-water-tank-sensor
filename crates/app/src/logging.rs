@@ -310,7 +310,9 @@ async fn transmit_logs(logs: &[LogEntry], stack: Stack<'_>, url: &str) -> Result
 
     let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
     let mut tcp_client = TcpClient::new(stack, &tcp_client_state);
-    tcp_client.set_timeout(Some(Duration::from_millis(DEFAULT_TCP_TIMEOUT_IN_MILLISECONDS)));
+    tcp_client.set_timeout(Some(Duration::from_millis(
+        DEFAULT_TCP_TIMEOUT_IN_MILLISECONDS,
+    )));
 
     log_to_console(
         Level::Debug,
